@@ -35,19 +35,18 @@
 #include "ProgramOptions/Section.h"
 #include "ProgramOptions/Translator.h"
 
-using namespace arangodb;
 using namespace arangodb::basics;
-using namespace arangodb::rest;
 using namespace arangodb::options;
 
-ConfigFeature::ConfigFeature(application_features::ApplicationServer* server,
-                             std::string const& progname)
+namespace arangodb {
+
+ConfigFeature::ConfigFeature(application_features::ApplicationServer& server,
+                             std::string const& progname, std::string const& configFilename)
     : ApplicationFeature(server, "Config"),
-      _file(""),
+      _file(configFilename),
       _checkConfiguration(false),
       _progname(progname) {
   setOptional(false);
-  requiresElevatedPrivileges(false);
   startsAfter("Logger");
   startsAfter("ShellColors");
 }
@@ -58,20 +57,22 @@ void ConfigFeature::collectOptions(std::shared_ptr<ProgramOptions> options) {
 
   // add --config as an alias for --configuration. both point to the same
   // variable!
-  options->addHiddenOption("--config", "the configuration file or 'none'",
-                           new StringParameter(&_file));
+  options->addOption("--config", "the configuration file or 'none'",
+                     new StringParameter(&_file),
+                     arangodb::options::makeFlags(arangodb::options::Flags::Hidden));
 
-  options->addHiddenOption("--define,-D",
-                           "define key=value for a @key@ entry in config file",
-                           new VectorParameter<StringParameter>(&_defines));
+  options->addOption("--define,-D",
+                     "define key=value for a @key@ entry in config file",
+                     new VectorParameter<StringParameter>(&_defines),
+                     arangodb::options::makeFlags(arangodb::options::Flags::Hidden));
 
-  options->addHiddenOption("--check-configuration",
-                           "check the configuration and exit",
-                           new BooleanParameter(&_checkConfiguration));
+  options->addOption("--check-configuration", "check the configuration and exit",
+                     new BooleanParameter(&_checkConfiguration),
+                     arangodb::options::makeFlags(arangodb::options::Flags::Hidden,
+                                                  arangodb::options::Flags::Command));
 }
 
-void ConfigFeature::loadOptions(std::shared_ptr<ProgramOptions> options,
-                                char const* binaryPath) {
+void ConfigFeature::loadOptions(std::shared_ptr<ProgramOptions> options, char const* binaryPath) {
   for (auto const& def : _defines) {
     arangodb::options::DefineEnvironment(def);
   }
@@ -84,8 +85,7 @@ void ConfigFeature::loadOptions(std::shared_ptr<ProgramOptions> options,
 }
 
 void ConfigFeature::loadConfigFile(std::shared_ptr<ProgramOptions> options,
-                                   std::string const& progname,
-                                   char const* binaryPath) {
+                                   std::string const& progname, char const* binaryPath) {
   if (StringUtils::tolower(_file) == "none") {
     LOG_TOPIC(DEBUG, Logger::CONFIG) << "using no config file at all";
     return;
@@ -103,8 +103,7 @@ void ConfigFeature::loadConfigFile(std::shared_ptr<ProgramOptions> options,
   // always prefer an explicitly given config file
   if (!_file.empty()) {
     if (!FileUtils::exists(_file)) {
-      LOG_TOPIC(FATAL, Logger::CONFIG) << "cannot read config file '" << _file
-                                       << "'";
+      LOG_TOPIC(FATAL, Logger::CONFIG) << "cannot read config file '" << _file << "'";
       FATAL_ERROR_EXIT();
     }
 
@@ -120,8 +119,7 @@ void ConfigFeature::loadConfigFile(std::shared_ptr<ProgramOptions> options,
       }
     }
 
-    LOG_TOPIC(DEBUG, Logger::CONFIG) << "using user supplied config file '"
-                                     << _file << "'";
+    LOG_TOPIC(DEBUG, Logger::CONFIG) << "using user supplied config file '" << _file << "'";
 
     if (!parser.parse(_file, true)) {
       FATAL_ERROR_EXIT();
@@ -134,8 +132,8 @@ void ConfigFeature::loadConfigFile(std::shared_ptr<ProgramOptions> options,
   //
   // check the following location in this order:
   //
-  //   <PRGNAME>.conf
   //   ./etc/relative/<PRGNAME>.conf
+  //   <PRGNAME>.conf
   //   ${HOME}/.arangodb/<PRGNAME>.conf
   //   /etc/arangodb/<PRGNAME>.conf
   //
@@ -151,19 +149,24 @@ void ConfigFeature::loadConfigFile(std::shared_ptr<ProgramOptions> options,
 
   std::vector<std::string> locations;
 
+  std::string current = FileUtils::currentDirectory().result();
+  // ./etc/relative/ is always first choice, if it exists
+  locations.emplace_back(FileUtils::buildFilename(current, "etc", "relative"));
+
   if (context != nullptr) {
     auto root = context->runRoot();
+    // will resolve to ./build/etc/arangodb3/ in maintainer builds
     auto location = FileUtils::buildFilename(root, _SYSCONFDIR_);
 
-    LOG_TOPIC(TRACE, Logger::CONFIG) << "checking root location '" << root
-                                     << "'";
+    LOG_TOPIC(TRACE, Logger::CONFIG) << "checking root location '" << root << "'";
 
     locations.emplace_back(location);
   }
 
-  std::string current = FileUtils::currentDirectory().result();
+  // ./
   locations.emplace_back(current);
-  locations.emplace_back(FileUtils::buildFilename(current, "etc", "relative"));
+
+  // ~/.arangodb/
   locations.emplace_back(
       FileUtils::buildFilename(FileUtils::homeDirectory(), ".arangodb"));
   locations.emplace_back(FileUtils::configDirectory(binaryPath));
@@ -179,8 +182,8 @@ void ConfigFeature::loadConfigFile(std::shared_ptr<ProgramOptions> options,
       filename = name;
       break;
     } else if (checkArangoImp) {
-      name = FileUtils::buildFilename(location, "arangoimp");
-      LOG_TOPIC(TRACE, Logger::CONFIG) << "checking config file'" << name << "'";
+      name = FileUtils::buildFilename(location, "arangoimp.conf");
+      LOG_TOPIC(TRACE, Logger::CONFIG) << "checking config file '" << name << "'";
       if (FileUtils::exists(name)) {
         LOG_TOPIC(DEBUG, Logger::CONFIG) << "found config file '" << name << "'";
         filename = name;
@@ -232,3 +235,5 @@ void ConfigFeature::loadConfigFile(std::shared_ptr<ProgramOptions> options,
     exit(EXIT_FAILURE);
   }
 }
+
+}  // namespace arangodb

@@ -22,11 +22,20 @@
 
 #include "InitDatabaseFeature.h"
 
+#ifdef _WIN32
+#include <locale.h>
+#include <string.h>
+#include <tchar.h>
+#include <unicode/locid.h>
+#include <iomanip>
+#endif
+
 #include <chrono>
 #include <iostream>
 #include <thread>
 
 #include "Basics/FileUtils.h"
+#include "Basics/exitcodes.h"
 #include "Basics/terminal-utils.h"
 #include "Cluster/ServerState.h"
 #include "Logger/Logger.h"
@@ -35,58 +44,56 @@
 #include "ProgramOptions/Section.h"
 #include "RestServer/DatabasePathFeature.h"
 
-using namespace arangodb;
 using namespace arangodb::application_features;
 using namespace arangodb::basics;
 using namespace arangodb::options;
 
-InitDatabaseFeature::InitDatabaseFeature(ApplicationServer* server,
-    std::vector<std::string> const& nonServerFeatures)
-  : ApplicationFeature(server, "InitDatabase"),
-    _nonServerFeatures(nonServerFeatures) {
+namespace arangodb {
+
+InitDatabaseFeature::InitDatabaseFeature(application_features::ApplicationServer& server,
+                                         std::vector<std::string> const& nonServerFeatures)
+    : ApplicationFeature(server, "InitDatabase"),
+      _nonServerFeatures(nonServerFeatures) {
   setOptional(false);
-  requiresElevatedPrivileges(false);
-  startsAfter("Logger");
-  startsAfter("DatabasePath");
+  startsAfter("BasicsPhase");
 }
 
-void InitDatabaseFeature::collectOptions(
-    std::shared_ptr<ProgramOptions> options) {
+void InitDatabaseFeature::collectOptions(std::shared_ptr<ProgramOptions> options) {
   options->addSection("database", "Configure the database");
 
-  options->addHiddenOption("--database.init-database",
-                           "initializes an empty database",
-                           new BooleanParameter(&_initDatabase));
+  options->addOption("--database.init-database", "initializes an empty database",
+                     new BooleanParameter(&_initDatabase),
+                     arangodb::options::makeFlags(arangodb::options::Flags::Hidden,
+                                                  arangodb::options::Flags::Command));
 
-  options->addHiddenOption("--database.restore-admin",
-                           "resets the admin users and sets a new password",
-                           new BooleanParameter(&_restoreAdmin));
+  options->addOption("--database.restore-admin",
+                     "resets the admin users and sets a new password",
+                     new BooleanParameter(&_restoreAdmin),
+                     arangodb::options::makeFlags(arangodb::options::Flags::Hidden,
+                                                  arangodb::options::Flags::Command));
 
-  options->addHiddenOption("--database.password",
-                           "initial password of root user",
-                           new StringParameter(&_password));
+  options->addOption("--database.password", "initial password of root user",
+                     new StringParameter(&_password),
+                     arangodb::options::makeFlags(arangodb::options::Flags::Hidden));
 }
 
-void InitDatabaseFeature::validateOptions(
-    std::shared_ptr<ProgramOptions> options) {
+void InitDatabaseFeature::validateOptions(std::shared_ptr<ProgramOptions> options) {
   ProgramOptions::ProcessingResult const& result = options->processingResult();
   _seenPassword = result.touched("database.password");
 
   if (_initDatabase || _restoreAdmin) {
     ApplicationServer::forceDisableFeatures(_nonServerFeatures);
     ServerState::instance()->setRole(ServerState::ROLE_SINGLE);
+
+    // we can turn off all warnings about environment here, because they
+    // wil show up on a regular start later anyway
+    ApplicationServer::disableFeatures({"Environment"});
   }
 }
 
 void InitDatabaseFeature::prepare() {
   if (!_seenPassword) {
-    std::string env = "ARANGODB_DEFAULT_ROOT_PASSWORD";
-    char const* password = getenv(env.c_str());
-
-    if (password != nullptr) {
-      env += "=";
-      putenv(const_cast<char*>(env.c_str()));
-      _password = password;
+    if (TRI_GETENV("ARANGODB_DEFAULT_ROOT_PASSWORD", _password)) {
       _seenPassword = true;
     }
   }
@@ -111,9 +118,11 @@ void InitDatabaseFeature::prepare() {
           _password = password1;
           break;
         }
-        LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "passwords do not match, please repeat";
+        LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+            << "passwords do not match, please repeat";
       } else {
-        LOG_TOPIC(FATAL, arangodb::Logger::FIXME) << "initialization aborted by user";
+        LOG_TOPIC(FATAL, arangodb::Logger::FIXME)
+            << "initialization aborted by user";
         FATAL_ERROR_EXIT();
       }
     }
@@ -128,7 +137,15 @@ std::string InitDatabaseFeature::readPassword(std::string const& message) {
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
   std::cerr << std::flush;
   std::cout << message << ": " << std::flush;
-
+#ifdef _WIN32
+  TRI_SetStdinVisibility(false);
+  TRI_DEFER(TRI_SetStdinVisibility(true));
+  std::wstring wpassword;
+  _setmode(_fileno(stdin), _O_U16TEXT);
+  std::getline(std::wcin, wpassword);
+  UnicodeString pw(wpassword.c_str(), static_cast<int32_t>(wpassword.length()));
+  pw.toUTF8String<std::string>(password);
+#else
 #ifdef TRI_HAVE_TERMIOS_H
   TRI_SetStdinVisibility(false);
   std::getline(std::cin, password);
@@ -137,20 +154,21 @@ std::string InitDatabaseFeature::readPassword(std::string const& message) {
 #else
   std::getline(std::cin, password);
 #endif
-
+#endif
   std::cout << std::endl;
 
   return password;
 }
 
 void InitDatabaseFeature::checkEmptyDatabase() {
-  auto database = ApplicationServer::getFeature<DatabasePathFeature>("DatabasePath");
+  auto database =
+      ApplicationServer::getFeature<DatabasePathFeature>("DatabasePath");
   std::string path = database->directory();
   std::string serverFile = database->subdirectoryName("SERVER");
 
   bool empty = false;
   std::string message;
-  int code = 2;
+  int code = TRI_EXIT_CODE_RESOLVING_FAILED;
 
   if (FileUtils::exists(path)) {
     if (!FileUtils::isDirectory(path)) {
@@ -161,8 +179,7 @@ void InitDatabaseFeature::checkEmptyDatabase() {
 
     if (FileUtils::exists(serverFile)) {
       if (FileUtils::isDirectory(serverFile)) {
-        message =
-            "database SERVER '" + serverFile + "' is not a file";
+        message = "database SERVER '" + serverFile + "' is not a file";
         code = EXIT_FAILURE;
         goto doexit;
       }
@@ -175,6 +192,7 @@ void InitDatabaseFeature::checkEmptyDatabase() {
 
   if (!empty) {
     message = "database already initialized, refusing to initialize it again";
+    code = TRI_EXIT_DB_NOT_EMPTY;
     goto doexit;
   }
 
@@ -189,3 +207,5 @@ doexit:
   TRI_EXIT_FUNCTION(code, nullptr);
   exit(code);
 }
+
+}  // namespace arangodb

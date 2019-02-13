@@ -24,29 +24,52 @@
 #define ARANGODB_REST_SERVER_VIEW_TYPES_FEATURE_H 1
 
 #include "ApplicationFeatures/ApplicationFeature.h"
-#include "VocBase/ViewImplementation.h"
+#include "VocBase/LogicalView.h"
 
 namespace arangodb {
 
-class ViewTypesFeature final
-    : public application_features::ApplicationFeature {
- public:
-  explicit ViewTypesFeature(
-      application_features::ApplicationServer* server);
+////////////////////////////////////////////////////////////////////////////////
+/// @brief LogicalView factory for both end-user and internal instantiation
+////////////////////////////////////////////////////////////////////////////////
+struct ViewFactory {
+  virtual ~ViewFactory() = default;  // define to silence warning
 
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief LogicalView factory for end-user validation instantiation and
+  ///        persistence
+  /// @return if success then 'view' is set, else 'view' state is undefined
+  //////////////////////////////////////////////////////////////////////////////
+  virtual Result create(LogicalView::ptr& view, TRI_vocbase_t& vocbase,
+                        velocypack::Slice const& definition) const = 0;
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief LogicalView factory for internal instantiation only
+  //////////////////////////////////////////////////////////////////////////////
+  virtual Result instantiate(LogicalView::ptr& view, TRI_vocbase_t& vocbase,
+                             velocypack::Slice const& definition,
+                             uint64_t planVersion  // cluster plan version ('0' by default for non-cluster)
+                             ) const = 0;
+};
+
+class ViewTypesFeature final : public application_features::ApplicationFeature {
  public:
+  explicit ViewTypesFeature(application_features::ApplicationServer& server);
+
+  /// @return 'factory' for 'type' was added successfully
+  Result emplace(LogicalDataSource::Type const& type, ViewFactory const& factory);
+
+  /// @return factory for the specified type or a failing placeholder if no such
+  /// type
+  ViewFactory const& factory(LogicalDataSource::Type const& type) const noexcept;
+
+  static std::string const& name();
   void prepare() override final;
   void unprepare() override final;
 
-  static void registerViewImplementation(std::string const& type, ViewCreator creator);
-
-  bool isValidType(std::string const& type) const;
-
-  ViewCreator& creator(std::string const& type) const;
-
  private:
-  static std::unordered_map<std::string, arangodb::ViewCreator> _viewCreators;
+  std::unordered_map<LogicalDataSource::Type const*, ViewFactory const*> _factories;
 };
-}
+
+}  // namespace arangodb
 
 #endif

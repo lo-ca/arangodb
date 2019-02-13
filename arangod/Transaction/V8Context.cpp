@@ -25,6 +25,7 @@
 #include "StorageEngine/TransactionState.h"
 #include "Transaction/StandaloneContext.h"
 #include "Utils/CollectionNameResolver.h"
+#include "V8Server/V8DealerFeature.h"
 
 #include <v8.h>
 #include "V8/v8-globals.h"
@@ -32,20 +33,19 @@
 using namespace arangodb;
 
 /// @brief create the context
-transaction::V8Context::V8Context(TRI_vocbase_t* vocbase, bool embeddable)
+transaction::V8Context::V8Context(TRI_vocbase_t& vocbase, bool embeddable)
     : Context(vocbase),
       _sharedTransactionContext(nullptr),
       _mainScope(nullptr),
       _currentTransaction(nullptr),
       _embeddable(embeddable) {
-      // need to set everything here
-      TRI_GET_GLOBALS2(v8::Isolate::GetCurrent());
-      _sharedTransactionContext = static_cast<transaction::V8Context*>(v8g->_transactionContext);
-    }
+  // need to set everything here
+  TRI_GET_GLOBALS2(v8::Isolate::GetCurrent());
+  _sharedTransactionContext = static_cast<transaction::V8Context*>(v8g->_transactionContext);
+}
 
 /// @brief order a custom type handler for the collection
-std::shared_ptr<VPackCustomTypeHandler>
-transaction::V8Context::orderCustomTypeHandler() {
+std::shared_ptr<VPackCustomTypeHandler> transaction::V8Context::orderCustomTypeHandler() {
   if (_customTypeHandler == nullptr) {
     transaction::V8Context* main = _sharedTransactionContext->_mainScope;
 
@@ -53,8 +53,9 @@ transaction::V8Context::orderCustomTypeHandler() {
       _customTypeHandler = main->orderCustomTypeHandler();
     } else {
       _customTypeHandler.reset(
-          transaction::Context::createCustomTypeHandler(_vocbase, getResolver()));
+          transaction::Context::createCustomTypeHandler(_vocbase, resolver()));
     }
+
     _options.customTypeHandler = _customTypeHandler.get();
     _dumpOptions.customTypeHandler = _customTypeHandler.get();
   }
@@ -62,24 +63,26 @@ transaction::V8Context::orderCustomTypeHandler() {
   TRI_ASSERT(_customTypeHandler != nullptr);
   TRI_ASSERT(_options.customTypeHandler != nullptr);
   TRI_ASSERT(_dumpOptions.customTypeHandler != nullptr);
+
   return _customTypeHandler;
 }
 
 /// @brief return the resolver
-CollectionNameResolver const* transaction::V8Context::getResolver() {
+CollectionNameResolver const& transaction::V8Context::resolver() {
   if (_resolver == nullptr) {
     transaction::V8Context* main = _sharedTransactionContext->_mainScope;
 
     if (main != nullptr && main != this && !main->isGlobal()) {
-      _resolver = main->getResolver();
+      _resolver = &(main->resolver());
     } else {
       TRI_ASSERT(_resolver == nullptr);
-      _resolver = createResolver();
+      createResolver();  // sets _resolver
     }
   }
 
   TRI_ASSERT(_resolver != nullptr);
-  return _resolver;
+
+  return *_resolver;
 }
 
 /// @brief get parent transaction (if any)
@@ -120,12 +123,10 @@ bool transaction::V8Context::isGlobal() const {
 TransactionState* transaction::V8Context::getParentState() {
   TRI_v8_global_t* v8g = static_cast<TRI_v8_global_t*>(
       v8::Isolate::GetCurrent()->GetData(V8PlatformFeature::V8_DATA_SLOT));
-  if (v8g == nullptr ||
-      v8g->_transactionContext == nullptr) {
+  if (v8g == nullptr || v8g->_transactionContext == nullptr) {
     return nullptr;
   }
-  return static_cast<transaction::V8Context*>(v8g->_transactionContext)
-             ->_currentTransaction;
+  return static_cast<transaction::V8Context*>(v8g->_transactionContext)->_currentTransaction;
 }
 
 /// @brief check whether the transaction is embedded
@@ -134,15 +135,17 @@ bool transaction::V8Context::isEmbedded() {
 }
 
 /// @brief create a context, returned in a shared ptr
-std::shared_ptr<transaction::V8Context> transaction::V8Context::Create(
-    TRI_vocbase_t* vocbase, bool embeddable) {
+std::shared_ptr<transaction::V8Context> transaction::V8Context::Create(TRI_vocbase_t& vocbase,
+                                                                       bool embeddable) {
   return std::make_shared<transaction::V8Context>(vocbase, embeddable);
 }
-      
+
 std::shared_ptr<transaction::Context> transaction::V8Context::CreateWhenRequired(
-    TRI_vocbase_t* vocbase, bool embeddable) {
-  if (v8::Isolate::GetCurrent() != nullptr) {
+    TRI_vocbase_t& vocbase, bool embeddable) {
+  // is V8 enabled and are currently in a V8 scope ?
+  if (V8DealerFeature::DEALER != nullptr && v8::Isolate::GetCurrent() != nullptr) {
     return Create(vocbase, embeddable);
   }
+
   return transaction::StandaloneContext::Create(vocbase);
 }

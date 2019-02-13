@@ -21,10 +21,12 @@
 /// @author Vasiliy Nabatchikov
 ////////////////////////////////////////////////////////////////////////////////
 
-#include <mutex>
-#include <unordered_map>
 #include "singleton.hpp"
 #include "timer_utils.hpp"
+
+#include <mutex>
+#include <unordered_map>
+#include <map>
 
 NS_LOCAL
 
@@ -75,10 +77,13 @@ class timer_states: public iresearch::singleton<timer_states> {
   }
 
   bool visit(
-    const std::function<bool(const key_type& key, size_t count, size_t time)>& visitor
+      const std::function<bool(const key_type& key, size_t count, size_t time_us)>& visitor
   ) {
+    static const auto usec =
+      (1000000. * std::chrono::system_clock::period::num) / std::chrono::system_clock::period::den;
+
     for (auto& entry: state_map_) {
-      if (!visitor(entry.first, entry.second.count, entry.second.time)) {
+      if (!visitor(entry.first, entry.second.count, size_t(entry.second.time * usec))) { // truncate 'time_us'
         return false;
       }
     }
@@ -130,10 +135,50 @@ void init_stats(
 }
 
 bool visit(
-  const std::function<bool(const std::string& key, size_t count, size_t time)>& visitor
+    const std::function<bool(const std::string& key, size_t count, size_t time_us)>& visitor
 ) {
   return timer_states::instance().visit(visitor);
 }
 
-NS_END // NS_BEGIN(timer_utils)
-NS_END
+void flush_stats(std::ostream &out) {
+  std::map<std::string, std::pair<size_t, size_t>> ordered_stats;
+
+  iresearch::timer_utils::visit([&ordered_stats](const std::string& key, size_t count, size_t time)->bool {
+    std::string key_str = key;
+
+#if defined(__GNUC__)
+    if (key_str.compare(0, strlen("virtual "), "virtual ") == 0) {
+      key_str = key_str.substr(strlen("virtual "));
+    }
+
+    size_t i;
+
+    if (std::string::npos != (i = key_str.find(' ')) && key_str.find('(') > i) {
+      key_str = key_str.substr(i + 1);
+    }
+#elif defined(_MSC_VER)
+    size_t i;
+
+    if (std::string::npos != (i = key_str.find("__cdecl "))) {
+      key_str = key_str.substr(i + strlen("__cdecl "));
+    }
+#endif
+
+    ordered_stats.emplace(key_str, std::make_pair(count, time));
+    return true;
+  });
+
+  for (auto& entry: ordered_stats) {
+    auto& key = entry.first;
+    auto& count = entry.second.first;
+    auto& time = entry.second.second;
+    out << key << "\tcalls:" << count << ",\ttime: " << time/1000 << " us,\tavg call: " << time/1000/(double)count << " us"<< std::endl;
+  }
+}
+
+NS_END // timer_utils
+NS_END // NS_ROOT
+
+// -----------------------------------------------------------------------------
+// --SECTION--                                                       END-OF-FILE
+// -----------------------------------------------------------------------------

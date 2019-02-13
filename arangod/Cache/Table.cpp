@@ -34,6 +34,8 @@ using namespace arangodb::cache;
 const uint32_t Table::minLogSize = 8;
 const uint32_t Table::maxLogSize = 32;
 
+Table::GenericBucket::GenericBucket() : _state{}, _padding{} {}
+
 bool Table::GenericBucket::lock(uint64_t maxTries) {
   return _state.lock(maxTries);
 }
@@ -43,6 +45,16 @@ void Table::GenericBucket::unlock() {
   _state.unlock();
 }
 
+void Table::GenericBucket::clear() {
+  _state.lock(UINT64_MAX, [this]() -> void {
+    _state.clear();
+    for (size_t i = 0; i < paddingSize; i++) {
+      _padding[i] = static_cast<uint8_t>(0);
+    }
+    _state.unlock();
+  });
+}
+
 bool Table::GenericBucket::isMigrated() const {
   TRI_ASSERT(_state.isLocked());
   return _state.isSet(BucketState::Flag::migrated);
@@ -50,11 +62,7 @@ bool Table::GenericBucket::isMigrated() const {
 
 Table::Subtable::Subtable(std::shared_ptr<Table> source, GenericBucket* buckets,
                           uint64_t size, uint32_t mask, uint32_t shift)
-    : _source(source),
-      _buckets(buckets),
-      _size(size),
-      _mask(mask),
-      _shift(shift) {}
+    : _source(source), _buckets(buckets), _size(size), _mask(mask), _shift(shift) {}
 
 void* Table::Subtable::fetchBucket(uint32_t hash) {
   return &(_buckets[(hash & _mask) >> _shift]);
@@ -88,12 +96,23 @@ Table::Table(uint32_t logSize)
       _bucketClearer(defaultClearer),
       _slotsTotal(_size),
       _slotsUsed(static_cast<uint64_t>(0)) {
-  memset(_buckets, 0, BUCKET_SIZE * _size);
+  for (size_t i = 0; i < _size; i++) {
+    // use placement new in order to properly initialize the bucket
+    new (_buckets + i) GenericBucket();
+  }
+}
+
+Table::~Table() {
+  for (size_t i = 0; i < _size; i++) {
+    // retrieve pointer to bucket
+    GenericBucket* b = _buckets + i;
+    // call dtor
+    b->~GenericBucket();
+  }
 }
 
 uint64_t Table::allocationSize(uint32_t logSize) {
-  return sizeof(Table) + (BUCKET_SIZE * (static_cast<uint64_t>(1) << logSize)) +
-         Table::padding;
+  return sizeof(Table) + (BUCKET_SIZE * (static_cast<uint64_t>(1) << logSize)) + Table::padding;
 }
 
 uint64_t Table::memoryUsage() const { return Table::allocationSize(_logSize); }
@@ -102,8 +121,7 @@ uint64_t Table::size() const { return _size; }
 
 uint32_t Table::logSize() const { return _logSize; }
 
-std::pair<void*, Table*> Table::fetchAndLockBucket(
-    uint32_t hash, uint64_t maxTries) {
+std::pair<void*, Table*> Table::fetchAndLockBucket(uint32_t hash, uint64_t maxTries) {
   GenericBucket* bucket = nullptr;
   Table* source = nullptr;
   bool ok = _lock.readLock(maxTries);
@@ -228,14 +246,12 @@ bool Table::isEnabled(uint64_t maxTries) {
 
 bool Table::slotFilled() {
   size_t i = _slotsUsed.fetch_add(1, std::memory_order_acq_rel);
-  return ((static_cast<double>(i + 1) /
-           static_cast<double>(_slotsTotal)) > Table::idealUpperRatio);
+  return ((static_cast<double>(i + 1) / static_cast<double>(_slotsTotal)) > Table::idealUpperRatio);
 }
 
 bool Table::slotEmptied() {
   size_t i = _slotsUsed.fetch_sub(1, std::memory_order_acq_rel);
-  return (((static_cast<double>(i - 1) /
-            static_cast<double>(_slotsTotal)) < Table::idealLowerRatio) &&
+  return (((static_cast<double>(i - 1) / static_cast<double>(_slotsTotal)) < Table::idealLowerRatio) &&
           (_logSize > Table::minLogSize));
 }
 
@@ -259,8 +275,8 @@ uint32_t Table::idealSize() {
     return logSize() + 1;
   }
 
-  return (((static_cast<double>(_slotsUsed.load()) /
-            static_cast<double>(_slotsTotal)) > Table::idealUpperRatio)
+  return (((static_cast<double>(_slotsUsed.load()) / static_cast<double>(_slotsTotal)) >
+           Table::idealUpperRatio)
               ? (logSize() + 1)
               : (((static_cast<double>(_slotsUsed.load()) /
                    static_cast<double>(_slotsTotal)) < Table::idealLowerRatio)

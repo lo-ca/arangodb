@@ -30,30 +30,20 @@
 #include "GeneralServer/AuthenticationFeature.h"
 #include "Logger/Logger.h"
 #include "Rest/HttpRequest.h"
-#include "RestServer/FeatureCacheFeature.h"
 #include "Ssl/SslInterface.h"
-#include "VocBase/AuthInfo.h"
 
 using namespace arangodb;
 using namespace arangodb::basics;
 using namespace arangodb::rest;
 
-RestAuthHandler::RestAuthHandler(GeneralRequest* request,
-                                 GeneralResponse* response)
-    : RestVocbaseBaseHandler(request, response),
-      _validFor(60 * 60 * 24 * 30) {}
-
-bool RestAuthHandler::isDirect() const { return false; }
+RestAuthHandler::RestAuthHandler(GeneralRequest* request, GeneralResponse* response)
+    : RestVocbaseBaseHandler(request, response), _validFor(60 * 60 * 24 * 30) {}
 
 std::string RestAuthHandler::generateJwt(std::string const& username,
                                          std::string const& password) {
-  auto authentication = FeatureCacheFeature::instance()->authenticationFeature();
-  TRI_ASSERT(authentication != nullptr);
-
-  std::chrono::seconds exp =
-      std::chrono::duration_cast<std::chrono::seconds>(
-          std::chrono::system_clock::now().time_since_epoch()) +
-      _validFor;
+  std::chrono::seconds exp = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch()) +
+                             _validFor;
   VPackBuilder bodyBuilder;
   {
     VPackObjectBuilder p(&bodyBuilder);
@@ -61,25 +51,24 @@ std::string RestAuthHandler::generateJwt(std::string const& username,
     bodyBuilder.add("iss", VPackValue("arangodb"));
     bodyBuilder.add("exp", VPackValue(exp.count()));
   }
-  return authentication->authInfo()->generateJwt(bodyBuilder);
+  AuthenticationFeature* af = AuthenticationFeature::instance();
+  TRI_ASSERT(af != nullptr);
+  return af->tokenCache().generateJwt(bodyBuilder.slice());
 }
 
 RestStatus RestAuthHandler::execute() {
   auto const type = _request->requestType();
   if (type != rest::RequestType::POST) {
-    generateError(rest::ResponseCode::METHOD_NOT_ALLOWED,
-                  TRI_ERROR_HTTP_METHOD_NOT_ALLOWED);
+    generateError(rest::ResponseCode::METHOD_NOT_ALLOWED, TRI_ERROR_HTTP_METHOD_NOT_ALLOWED);
     return RestStatus::DONE;
   }
 
-  bool parseSuccess;
-  std::shared_ptr<VPackBuilder> parsedBody =
-      parseVelocyPackBody(parseSuccess);
+  bool parseSuccess = false;
+  VPackSlice slice = this->parseVPackBody(parseSuccess);
   if (!parseSuccess) {
     return badRequest();
   }
 
-  VPackSlice slice = parsedBody->slice();
   if (!slice.isObject()) {
     return badRequest();
   }
@@ -93,12 +82,13 @@ RestStatus RestAuthHandler::execute() {
 
   _username = usernameSlice.copyString();
   std::string const password = passwordSlice.copyString();
-  
-  auto authentication = FeatureCacheFeature::instance()->authenticationFeature();
-  AuthResult auth =
-    authentication->authInfo()->checkPassword(_username, password);
 
-  if (auth._authorized) {
+  auth::UserManager* um = AuthenticationFeature::instance()->userManager();
+  if (um == nullptr) {
+    std::string msg = "This server does not support users";
+    LOG_TOPIC(ERR, Logger::AUTHENTICATION) << msg;
+    generateError(rest::ResponseCode::UNAUTHORIZED, TRI_ERROR_HTTP_UNAUTHORIZED, msg);
+  } else if (um->checkPassword(_username, password)) {
     VPackBuilder resultBuilder;
     {
       VPackObjectBuilder b(&resultBuilder);
@@ -108,17 +98,16 @@ RestStatus RestAuthHandler::execute() {
 
     _isValid = true;
     generateDocument(resultBuilder.slice(), true, &VPackOptions::Defaults);
-    return RestStatus::DONE;
   } else {
     // mop: rfc 2616 10.4.2 (if credentials wrong 401)
-    generateError(rest::ResponseCode::UNAUTHORIZED,
-                  TRI_ERROR_HTTP_UNAUTHORIZED, "Wrong credentials");
-    return RestStatus::DONE;
+    generateError(rest::ResponseCode::UNAUTHORIZED, TRI_ERROR_HTTP_UNAUTHORIZED,
+                  "Wrong credentials");
   }
+  return RestStatus::DONE;
 }
 
 RestStatus RestAuthHandler::badRequest() {
-  generateError(rest::ResponseCode::BAD,
-                TRI_ERROR_HTTP_BAD_PARAMETER, "invalid JSON");
+  generateError(rest::ResponseCode::BAD, TRI_ERROR_HTTP_BAD_PARAMETER,
+                "invalid JSON");
   return RestStatus::DONE;
 }

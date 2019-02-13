@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2014-2016 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2014-2018 ArangoDB GmbH, Cologne, Germany
 /// Copyright 2004-2014 triAGENS GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,8 +38,8 @@ struct FailedLeader : public Job {
                std::string const& shard = std::string(),
                std::string const& from = std::string());
 
-  FailedLeader(Node const& snapshot, AgentInterface* agent,
-               JOB_STATUS status, std::string const& jobId);
+  FailedLeader(Node const& snapshot, AgentInterface* agent, JOB_STATUS status,
+               std::string const& jobId);
 
   virtual ~FailedLeader();
 
@@ -56,9 +56,8 @@ struct FailedLeader : public Job {
   std::string _from;
   std::string _to;
   std::chrono::time_point<std::chrono::system_clock> _created;
-  
 };
-}
-}  // namespaces
+}  // namespace consensus
+}  // namespace arangodb
 
 #endif

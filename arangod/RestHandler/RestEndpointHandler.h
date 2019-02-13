@@ -35,10 +35,11 @@ class RestEndpointHandler : public RestVocbaseBaseHandler {
  public:
   RestStatus execute() override final;
   char const* name() const override final { return "RestEndpointHandler"; }
+  RequestLane lane() const override final { return RequestLane::CLIENT_FAST; }
 
  protected:
   void retrieveEndpoints();
 };
-}
+}  // namespace arangodb
 
 #endif

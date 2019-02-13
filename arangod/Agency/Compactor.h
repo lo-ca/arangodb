@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2014-2016 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2014-2018 ArangoDB GmbH, Cologne, Germany
 /// Copyright 2004-2014 triAGENS GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,9 +35,7 @@ namespace consensus {
 class Agent;
 
 class Compactor : public arangodb::Thread {
-
-public:
-
+ public:
   // @brief Construct with agent pointer
   explicit Compactor(Agent* _agent);
 
@@ -55,21 +53,19 @@ public:
 
   /// @brief Do compaction
   void compact();
-  
-private:
-  
-  Agent* _agent; //< @brief Agent
+
+ private:
+  Agent* _agent;  //< @brief Agent
   // This condition variable is used for the compactor thread to go to
   // sleep. One has to set _wakeupCompactor to true under the Mutex of _cv
   // and then broadcast on the _cv to wake up the compactor thread.
   // Note that the Mutex is not held during the actual compaction!
   basics::ConditionVariable _cv;
   bool _wakeupCompactor;
-  long _waitInterval; //< @brief Wait interval 
-  
+  long _waitInterval;  //< @brief Wait interval
 };
 
-
-}}
+}  // namespace consensus
+}  // namespace arangodb
 
 #endif

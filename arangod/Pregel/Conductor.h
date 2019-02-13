@@ -23,14 +23,16 @@
 #ifndef ARANGODB_PREGEL_CONDUCTOR_H
 #define ARANGODB_PREGEL_CONDUCTOR_H 1
 
-#include <string>
+#include "Basics/Common.h"
 
 #include <boost/date_time/posix_time/posix_time.hpp>
-#include "Basics/Common.h"
+
 #include "Basics/Mutex.h"
+#include "Basics/asio_ns.h"
 #include "Cluster/ClusterComm.h"
 #include "Cluster/ClusterInfo.h"
 #include "Pregel/Statistics.h"
+#include "Scheduler/Scheduler.h"
 #include "Utils/DatabaseGuard.h"
 
 namespace arangodb {
@@ -59,7 +61,7 @@ class Conductor {
   const uint64_t _executionNumber;
   VPackBuilder _userParams;
   std::unique_ptr<IAlgorithm> _algorithm;
-  Mutex _callbackMutex;  // prevents concurrent calls to finishedGlobalStep
+  mutable Mutex _callbackMutex;  // prevents concurrent calls to finishedGlobalStep
 
   std::vector<CollectionID> _vertexCollections;
   std::vector<CollectionID> _edgeCollections;
@@ -90,7 +92,7 @@ class Conductor {
   double _startTimeSecs = 0;
   double _computationStartTimeSecs = 0;
   double _endTimeSecs = 0;
-  std::unique_ptr<boost::asio::deadline_timer> _boost_timer;
+  Scheduler::WorkHandle _workHandle;
 
   bool _startGlobalStep();
   int _initializeWorkers(std::string const& path, VPackSlice additional);
@@ -106,7 +108,7 @@ class Conductor {
   void finishedRecoveryStep(VPackSlice const& data);
 
  public:
-  Conductor(uint64_t executionNumber, TRI_vocbase_t* vocbase,
+  Conductor(uint64_t executionNumber, TRI_vocbase_t& vocbase,
             std::vector<CollectionID> const& vertexCollections,
             std::vector<CollectionID> const& edgeCollections,
             std::string const& algoName, VPackSlice const& userConfig);
@@ -116,17 +118,16 @@ class Conductor {
   void start();
   void cancel();
   void startRecovery();
-  VPackBuilder collectAQLResults();
+  void collectAQLResults(velocypack::Builder& outBuilder);
   VPackBuilder toVelocyPack() const;
 
   double totalRuntimeSecs() const {
-    return _endTimeSecs == 0 ? TRI_microtime() - _startTimeSecs
-                             : _endTimeSecs - _startTimeSecs;
+    return _endTimeSecs == 0 ? TRI_microtime() - _startTimeSecs : _endTimeSecs - _startTimeSecs;
   }
- 
+
  private:
   void cancelNoLock();
 };
-}
-}
+}  // namespace pregel
+}  // namespace arangodb
 #endif

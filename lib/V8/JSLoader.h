@@ -29,8 +29,8 @@
 
 #include <v8.h>
 
-#include <velocypack/Slice.h>
 #include <velocypack/Builder.h>
+#include <velocypack/Slice.h>
 #include <velocypack/velocypack-aliases.h>
 
 namespace arangodb {
@@ -64,28 +64,8 @@ class JSLoader : public ScriptLoader {
   //////////////////////////////////////////////////////////////////////////////
 
   JSLoader::eState loadScript(v8::Isolate* isolate, v8::Handle<v8::Context>&,
-      std::string const& name, VPackBuilder* builder);
-
-  //////////////////////////////////////////////////////////////////////////////
-  /// @brief loads all scripts
-  //////////////////////////////////////////////////////////////////////////////
-
-  bool loadAllScripts(v8::Isolate* isolate, v8::Handle<v8::Context>& context);
-
-  //////////////////////////////////////////////////////////////////////////////
-  /// @brief executes a named script
-  //////////////////////////////////////////////////////////////////////////////
-
-  bool executeScript(v8::Isolate* isolate, v8::Handle<v8::Context>& context,
-                     std::string const& name);
-
-  //////////////////////////////////////////////////////////////////////////////
-  /// @brief executes all scripts
-  //////////////////////////////////////////////////////////////////////////////
-
-  bool executeAllScripts(v8::Isolate* isolate,
-                         v8::Handle<v8::Context>& context);
+                              std::string const& name, VPackBuilder* builder);
 };
-}
+}  // namespace arangodb
 
 #endif

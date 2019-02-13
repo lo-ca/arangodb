@@ -38,7 +38,6 @@ namespace arangodb {
 
 // FORWARD declaration
 class LogicalCollection;
-struct OperationResult;
 
 struct OperationCursor {
  public:
@@ -52,10 +51,7 @@ struct OperationCursor {
 
  public:
   explicit OperationCursor(int code)
-      : code(code),
-        _hasMore(false),
-        _limit(0),
-        _batchSize(1000) {}
+      : code(code), _hasMore(false), _limit(0), _batchSize(1000) {}
 
   OperationCursor(IndexIterator* iterator, uint64_t batchSize)
       : code(TRI_ERROR_NO_ERROR),
@@ -65,11 +61,9 @@ struct OperationCursor {
         _batchSize(batchSize) {}
 
   ~OperationCursor() {}
-  
-  IndexIterator* indexIterator() const {
-    return _indexIterator.get();
-  }
-  
+
+  IndexIterator* indexIterator() const { return _indexIterator.get(); }
+
   LogicalCollection* collection() const;
 
   inline bool hasMore() {
@@ -79,53 +73,61 @@ struct OperationCursor {
     return _hasMore;
   }
 
-  bool ok() const {
-    return code == TRI_ERROR_NO_ERROR;
-  }
-  
-  bool fail() const {
-    return !ok();
-  }
+  bool ok() const { return code == TRI_ERROR_NO_ERROR; }
+
+  bool fail() const { return !ok(); }
 
   bool hasExtra() const;
+  bool hasCovering() const;
 
-/// @brief Reset the cursor
+  /// @brief Reset the cursor
   void reset();
 
-/// @brief Calls cb for the next batchSize many elements 
-  bool next(IndexIterator::LocalDocumentIdCallback const& callback,
-      uint64_t batchSize);
-  
-/// @brief Calls cb for the next batchSize many elements 
-  bool nextWithExtra(IndexIterator::ExtraCallback const& callback,
-      uint64_t batchSize);
+  /// @brief Calls cb for the next batchSize many elements
+  /// returns true if there are more documents (hasMore) and false
+  /// if there are none
+  bool next(IndexIterator::LocalDocumentIdCallback const& callback, uint64_t batchSize);
 
-  bool nextDocument(IndexIterator::DocumentCallback const& callback,
-                    uint64_t batchSize);
-  
-/// @brief convenience function to retrieve all results
-  void all(IndexIterator::LocalDocumentIdCallback const& callback) {
-    while (next(callback, 1000)) {}
-  }
+  /// @brief Calls cb for the next batchSize many elements
+  /// returns true if there are more documents (hasMore) and false
+  /// if there are none
+  bool nextWithExtra(IndexIterator::ExtraCallback const& callback, uint64_t batchSize);
 
-/// @brief convenience function to retrieve all results with extra
-  void allWithExtra(IndexIterator::ExtraCallback const& callback) {
-    while (nextWithExtra(callback, 1000)) {}
-  }
-  
+  /// @brief Calls cb for the next batchSize many elements, complete documents
+  /// returns true if there are more documents (hasMore) and false
+  /// if there are none
+  bool nextDocument(IndexIterator::DocumentCallback const& callback, uint64_t batchSize);
+
+  /// @brief Calls cb for the next batchSize many elements, index-only
+  /// projections returns true if there are more documents (hasMore) and false
+  /// if there are none
+  bool nextCovering(IndexIterator::DocumentCallback const& callback, uint64_t batchSize);
+
   /// @brief convenience function to retrieve all results
-  void allDocuments(IndexIterator::DocumentCallback const& callback) {
-    while (nextDocument(callback, 1000)) {}
+  void all(IndexIterator::LocalDocumentIdCallback const& callback) {
+    while (next(callback, 1000)) {
+    }
   }
 
-/// @brief Skip the next toSkip many elements.
-///        skipped will be increased by the amount of skipped elements afterwards
-///        Check hasMore()==true before using this
-///        NOTE: This will throw on OUT_OF_MEMORY
-  int skip(uint64_t, uint64_t&);
+  /// @brief convenience function to retrieve all results with extra
+  void allWithExtra(IndexIterator::ExtraCallback const& callback) {
+    while (nextWithExtra(callback, 1000)) {
+    }
+  }
 
+  /// @brief convenience function to retrieve all results
+  void allDocuments(IndexIterator::DocumentCallback const& callback, uint64_t batchSize) {
+    while (nextDocument(callback, batchSize)) {
+    }
+  }
+
+  /// @brief skip the next toSkip many elements.
+  ///        skipped will be increased by the amount of skipped elements
+  ///        afterwards Check hasMore()==true before using this NOTE: This will
+  ///        throw on OUT_OF_MEMORY
+  void skip(uint64_t toSkip, uint64_t& skipped);
 };
 
-}
+}  // namespace arangodb
 
 #endif

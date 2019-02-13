@@ -74,13 +74,18 @@ void busywait_mutex::unlock() {
   }
 }
 
-read_write_mutex::read_write_mutex()
-  : concurrent_count_(0), exclusive_count_(0), exclusive_owner_recursion_count_(0) {
+read_write_mutex::read_write_mutex() NOEXCEPT
+  : concurrent_count_(0),
+    exclusive_count_(0),
+    exclusive_owner_recursion_count_(0) {
 }
 
-read_write_mutex::~read_write_mutex() {
+read_write_mutex::~read_write_mutex() NOEXCEPT {
+#ifdef IRESEARCH_DEBUG
+  // ensure mutex is not locked before destroying it
   TRY_SCOPED_LOCK_NAMED(mutex_, lock);
   assert(lock && !concurrent_count_.load() && !exclusive_count_);
+#endif
 }
 
 void read_write_mutex::lock_read() {
@@ -115,7 +120,11 @@ void read_write_mutex::lock_write() {
 
   // wait until lock is held exclusively by the current thread
   while (concurrent_count_) {
-    writer_cond_.wait_for(lock, std::chrono::milliseconds(1000));
+    try {
+      writer_cond_.wait_for(lock, std::chrono::milliseconds(1000));
+    } catch (...) {
+      // 'wait_for' may throw according to specification
+    }
   }
 
   --exclusive_count_;
@@ -123,7 +132,7 @@ void read_write_mutex::lock_write() {
   lock.release(); // disassociate the associated mutex without unlocking it
 }
 
-bool read_write_mutex::owns_write() {
+bool read_write_mutex::owns_write() NOEXCEPT {
   return exclusive_owner_.load() == std::this_thread::get_id();
 }
 
@@ -202,6 +211,7 @@ void read_write_mutex::unlock(bool exclusive_only /*= false*/) {
   #ifdef IRESEARCH_DEBUG
     auto count = --concurrent_count_;
     assert(count != size_t(-1)); // ensure decrement was for a positive number (i.e. not --0)
+    UNUSED(count);
   #else
     --concurrent_count_;
   #endif // IRESEARCH_DEBUG
@@ -358,7 +368,7 @@ void thread_pool::run() {
         try {
           pool_.emplace_back([](thread_pool* pool)->void{ pool->run(); }, this); // add one thread
         } catch (std::bad_alloc&) {
-          IR_EXCEPTION(); // log and ignore exception, new tasks will start new thread
+          IR_LOG_EXCEPTION(); // log and ignore exception, new tasks will start new thread
         }
       }
 
@@ -367,7 +377,7 @@ void thread_pool::run() {
       try {
         fn();
       } catch (...) {
-        IR_EXCEPTION();
+        IR_LOG_EXCEPTION();
       }
 
       lock.lock();

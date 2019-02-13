@@ -27,6 +27,7 @@
 #include "RestHandler/RestVocbaseBaseHandler.h"
 
 #include "Actions/actions.h"
+#include "Scheduler/Scheduler.h"
 
 namespace arangodb {
 class RestActionHandler : public RestVocbaseBaseHandler {
@@ -35,17 +36,17 @@ class RestActionHandler : public RestVocbaseBaseHandler {
 
  public:
   char const* name() const override final { return "RestActionHandler"; }
-  bool isDirect() const override;
+  RequestLane lane() const override final { return RequestLane::CLIENT_V8; }
   RestStatus execute() override;
   bool cancel() override;
 
  private:
   // executes an action
-  TRI_action_result_t executeAction();
+  void executeAction();
 
  protected:
   // action
-  TRI_action_t* _action;
+  std::shared_ptr<TRI_action_t> _action;
 
   // data lock
   Mutex _dataLock;
@@ -53,6 +54,6 @@ class RestActionHandler : public RestVocbaseBaseHandler {
   // data for cancelation
   void* _data;
 };
-}
+}  // namespace arangodb
 
 #endif

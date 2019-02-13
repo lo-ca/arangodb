@@ -41,14 +41,18 @@ class ShortStringStorage {
   ~ShortStringStorage();
 
   /// @brief register a short string
-  char* registerString(char const*, size_t);
+  char* registerString(char const* p, size_t length);
 
+  /// @brief register a short string, unescaping it
+  char* unescape(char const* p, size_t length, size_t* outLength);
+
+ private:
   /// @brief allocate a new block of memory
   void allocateBlock();
 
  public:
   /// @brief maximum length of strings in short string storage
-  static constexpr size_t maxStringLength() { return 127; }
+  static constexpr size_t maxStringLength = 127;
 
  private:
   ResourceMonitor* _resourceMonitor;
@@ -65,7 +69,7 @@ class ShortStringStorage {
   /// @brief end of current block
   char* _end;
 };
-}
-}
+}  // namespace aql
+}  // namespace arangodb
 
 #endif

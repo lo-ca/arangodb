@@ -28,41 +28,39 @@
 #include "V8Server/V8DealerFeature.h"
 #include "V8Server/v8-actions.h"
 
-using namespace arangodb;
 using namespace arangodb::application_features;
 using namespace arangodb::options;
 
+namespace arangodb {
+
 ActionFeature* ActionFeature::ACTION = nullptr;
 
-ActionFeature::ActionFeature(application_features::ApplicationServer* server)
-    : ApplicationFeature(server, "Action"),
-      _allowUseDatabase(false) {
+ActionFeature::ActionFeature(application_features::ApplicationServer& server)
+    : ApplicationFeature(server, "Action"), _allowUseDatabase(false) {
   setOptional(true);
-  requiresElevatedPrivileges(false);
-  startsAfter("Logger");
+  startsAfter("ClusterPhase");
 }
 
 void ActionFeature::collectOptions(std::shared_ptr<ProgramOptions> options) {
   options->addSection("server", "Server features");
 
-  options->addHiddenOption(
+  options->addOption(
       "--server.allow-use-database",
       "allow change of database in REST actions, only needed for "
       "unittests",
-      new BooleanParameter(&_allowUseDatabase));
+      new BooleanParameter(&_allowUseDatabase),
+      arangodb::options::makeFlags(arangodb::options::Flags::Hidden));
 }
 
 void ActionFeature::start() {
   ACTION = this;
 
-  V8DealerFeature* dealer = 
+  V8DealerFeature* dealer =
       ApplicationServer::getFeature<V8DealerFeature>("V8Dealer");
 
-  dealer->defineContextUpdate(
-      [](v8::Isolate* isolate, v8::Handle<v8::Context> context, size_t) {
-        TRI_InitV8Actions(isolate, context);
-      },
-      nullptr);
+  dealer->defineContextUpdate([](v8::Isolate* isolate, v8::Handle<v8::Context> context,
+                                 size_t) { TRI_InitV8Actions(isolate, context); },
+                              nullptr);
 }
 
 void ActionFeature::unprepare() {
@@ -70,3 +68,5 @@ void ActionFeature::unprepare() {
 
   ACTION = nullptr;
 }
+
+}  // namespace arangodb

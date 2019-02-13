@@ -25,10 +25,13 @@
 #define ARANGOD_VOCBASE_LOGICAL_VIEW_H 1
 
 #include "Basics/Common.h"
+#include "Basics/ReadWriteLock.h"
 #include "Basics/Result.h"
-#include "VocBase/ViewImplementation.h"
+#include "Logger/LogMacros.h"
+#include "Logger/Logger.h"
+#include "LogicalDataSource.h"
+#include "Meta/utility.h"
 #include "VocBase/voc-types.h"
-#include "VocBase/vocbase.h"
 
 #include <velocypack/Buffer.h>
 
@@ -36,115 +39,188 @@ namespace arangodb {
 
 namespace velocypack {
 class Slice;
-}
+class Builder;
+}  // namespace velocypack
 
-namespace aql {
-class ExecutionPlan;
-struct ExecutionContext;
-}
-
-class PhysicalView;
-
-class LogicalView {
-  friend struct ::TRI_vocbase_t;
-
+////////////////////////////////////////////////////////////////////////////////
+/// @class LogicalView
+////////////////////////////////////////////////////////////////////////////////
+class LogicalView : public LogicalDataSource {
  public:
-  LogicalView(TRI_vocbase_t*, velocypack::Slice const&);
-  ~LogicalView();
+  typedef std::shared_ptr<LogicalView> ptr;
+  typedef std::function<bool(TRI_voc_cid_t)> CollectionVisitor;
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief casts a specified 'LogicalView' to a provided Target type
+  //////////////////////////////////////////////////////////////////////////////
+  template <typename Target, typename Source>
+  inline static typename meta::adjustConst<Source, Target>::reference cast(Source& view) noexcept {
+    typedef typename meta::adjustConst<
+        Source, typename std::enable_if<std::is_base_of<LogicalView, Target>::value &&
+                                            std::is_same<typename std::remove_const<Source>::type, LogicalView>::value,
+                                        Target>::type>
+        target_type_t;
+
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+    // do not use dynamic_cast<typename target_type_t::reference>(view)
+    // to explicitly expose our intention to fail in 'noexcept' function
+    // in case of wrong type
+    auto impl = dynamic_cast<typename target_type_t::pointer>(&view);
+
+    if (!impl) {
+      LOG_TOPIC(ERR, Logger::VIEWS)
+          << "invalid convertion attempt from '" << typeid(Source).name() << "'"
+          << " to '" << typeid(typename target_type_t::value_type).name() << "'";
+      TRI_ASSERT(false);
+    }
+
+    return *impl;
+#else
+    return static_cast<typename target_type_t::reference>(view);
+#endif
+  }
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief casts a specified 'LogicalView' to a provided Target type
+  //////////////////////////////////////////////////////////////////////////////
+  template <typename Target, typename Source>
+  inline static typename meta::adjustConst<Source, Target>::pointer cast(Source* view) noexcept {
+    typedef typename meta::adjustConst<
+        Source, typename std::enable_if<std::is_base_of<LogicalView, Target>::value &&
+                                            std::is_same<typename std::remove_const<Source>::type, LogicalView>::value,
+                                        Target>::type>::pointer target_type_t;
+
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+    return dynamic_cast<target_type_t>(view);
+#else
+    return static_cast<target_type_t>(view);
+#endif
+  }
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief queries properties of an existing view
+  //////////////////////////////////////////////////////////////////////////////
+  virtual Result appendVelocyPack(velocypack::Builder& builder, bool detailed,
+                                  bool forPersistence) const override final;
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief the category representing a logical view
+  //////////////////////////////////////////////////////////////////////////////
+  static Category const& category() noexcept;
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief creates a new view according to a definition
+  /// @param view out-param for created view on success
+  ///        on success non-null, on failure undefined
+  /// @param vocbase database where the view resides
+  /// @param definition the view definition
+  /// @return success and sets 'view' or failure
+  //////////////////////////////////////////////////////////////////////////////
+  static Result create(LogicalView::ptr& view, TRI_vocbase_t& vocbase,
+                       velocypack::Slice definition);
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief drop an existing view
+  //////////////////////////////////////////////////////////////////////////////
+  virtual Result drop() override final;
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief calls the callback on every view found for the specified vocbase
+  /// @param callback if false is returned then enumiration stops
+  /// @return full enumeration finished successfully
+  //////////////////////////////////////////////////////////////////////////////
+  static bool enumerate(TRI_vocbase_t& vocbase,
+                        std::function<bool(std::shared_ptr<LogicalView> const&)> const& callback);
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief instantiates an existing view according to a definition
+  /// @param vocbase database where the view resides
+  /// @param definition the view definition
+  /// @return view instance or nullptr on error
+  //////////////////////////////////////////////////////////////////////////////
+  static Result instantiate(LogicalView::ptr& view, TRI_vocbase_t& vocbase,
+                            velocypack::Slice definition,
+                            uint64_t planVersion = 0  // '0' by default for non-cluster
+  );
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief opens an existing view when the server is restarted
+  //////////////////////////////////////////////////////////////////////////////
+  virtual void open() = 0;
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief renames an existing view
+  //////////////////////////////////////////////////////////////////////////////
+  virtual Result rename(std::string&& newName) override final;
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief invoke visitor on all collections that a view will return
   /// @return visitation was successful
   //////////////////////////////////////////////////////////////////////////////
-  bool visitCollections(
-      std::function<bool(TRI_voc_cid_t)> const& visitor
-  ) const {
-    return _implementation && _implementation->visitCollections(visitor);
-  }
+  virtual bool visitCollections(CollectionVisitor const& visitor) const = 0;
 
- protected:  // If you need a copy outside the class, use clone below.
-  explicit LogicalView(LogicalView const&);
+ protected:
+  LogicalView(TRI_vocbase_t& vocbase, velocypack::Slice const& definition, uint64_t planVersion);
 
- private:
-  LogicalView& operator=(LogicalView const&) = delete;
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief queries properties of an existing view
+  //////////////////////////////////////////////////////////////////////////////
+  virtual Result appendVelocyPackImpl(velocypack::Builder& builder, bool detailed,
+                                      bool forPersistence) const = 0;
 
- public:
-  LogicalView() = delete;
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief drop implementation-specific parts of an existing view
+  ///        including persisted properties
+  //////////////////////////////////////////////////////////////////////////////
+  virtual Result dropImpl() = 0;
 
-  std::unique_ptr<LogicalView> clone() {
-    auto p = new LogicalView(*this);
-    return std::unique_ptr<LogicalView>(p);
-  }
-
-  inline TRI_voc_cid_t id() const { return _id; }
-
-  TRI_voc_cid_t planId() const;
-
-  std::string type() const { return _type; }
-  std::string name() const;
-  std::string dbName() const;
-
-  bool deleted() const;
-  void setDeleted(bool);
-
-  void rename(std::string const& newName, bool doSync);
-
-  PhysicalView* getPhysical() const { return _physical.get(); }
-  ViewImplementation* getImplementation() const {
-    return _implementation.get();
-  }
-
-  void drop();
-
-  // SECTION: Serialization
-  velocypack::Builder toVelocyPack(bool includeProperties = false,
-                                   bool includeSystem = false) const;
-
-  void toVelocyPack(velocypack::Builder&, bool includeProperties = false,
-                    bool includeSystem = false) const;
-
-  inline TRI_vocbase_t* vocbase() const { return _vocbase; }
-
-  // Update this view.
-  arangodb::Result updateProperties(velocypack::Slice const&, bool, bool);
-
-  /// @brief Persist the connected physical view.
-  ///        This should be called AFTER the view is successfully
-  ///        created and only on Sinlge/DBServer
-  void persistPhysicalView();
-
-  /// @brief Create implementation object using factory method
-  void spawnImplementation(ViewCreator creator,
-                           arangodb::velocypack::Slice const& parameters,
-                           bool isNew);
-
-  static bool IsAllowedName(velocypack::Slice parameters);
-  static bool IsAllowedName(std::string const& name);
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief renames implementation-specific parts of an existing view
+  ///        including persistance of properties
+  //////////////////////////////////////////////////////////////////////////////
+  virtual Result renameImpl(std::string const& oldName) = 0;
 
  private:
-  // SECTION: Meta Information
-  //
-  // @brief Local view id
-  TRI_voc_cid_t const _id;
+  // FIXME seems to be ugly
+  friend struct ::TRI_vocbase_t;
 
-  // @brief Global view id
-  TRI_voc_cid_t const _planId;
+  // ensure LogicalDataSource members (e.g. _deleted/_name) are not modified
+  // asynchronously
+  mutable basics::ReadWriteLock _lock;
+};  // LogicalView
 
-  // @brief view type
-  std::string const _type;
+////////////////////////////////////////////////////////////////////////////////
+/// @brief a helper for ClusterInfo View operations
+////////////////////////////////////////////////////////////////////////////////
+struct LogicalViewHelperClusterInfo {
+  static Result construct(LogicalView::ptr& view, TRI_vocbase_t& vocbase,
+                          velocypack::Slice const& definition) noexcept;
 
-  // @brief view Name
-  std::string _name;
+  static Result destruct(LogicalView const& view) noexcept;
+  static Result drop(LogicalView const& view) noexcept;
 
-  bool _isDeleted;
+  static Result properties(velocypack::Builder& builder, LogicalView const& view) noexcept;
 
-  TRI_vocbase_t* _vocbase;
+  static Result properties(LogicalView const& view) noexcept;
 
-  std::unique_ptr<PhysicalView> _physical;
-  std::unique_ptr<ViewImplementation> _implementation;
+  static Result rename(LogicalView const& view, std::string const& oldName) noexcept;
+};
 
-  mutable basics::ReadWriteLock _lock;  // lock protecting the status and name
-  mutable basics::ReadWriteLock _infoLock;  // lock protecting the properties
+////////////////////////////////////////////////////////////////////////////////
+/// @brief a helper for StorageEngine View operations
+////////////////////////////////////////////////////////////////////////////////
+struct LogicalViewHelperStorageEngine {
+  static Result construct(LogicalView::ptr& view, TRI_vocbase_t& vocbase,
+                          velocypack::Slice const& definition) noexcept;
+
+  static Result destruct(LogicalView const& view) noexcept;
+  static Result drop(LogicalView const& view) noexcept;
+
+  static Result properties(velocypack::Builder& builder, LogicalView const& view) noexcept;
+
+  static Result properties(LogicalView const& view) noexcept;
+
+  static Result rename(LogicalView const& view, std::string const& oldName) noexcept;
 };
 
 }  // namespace arangodb

@@ -21,18 +21,29 @@
 /// @author Dr. Frank Celler
 ////////////////////////////////////////////////////////////////////////////////
 
-#include "v8-vocbaseprivate.h"
+#include "V8Server/v8-voccursor.h"
+#include "Aql/QueryCursor.h"
+#include "Aql/QueryResult.h"
+#include "Basics/VelocyPackHelper.h"
 #include "Basics/conversions.h"
+#include "Transaction/Context.h"
+#include "Transaction/V8Context.h"
+#include "Utils/CollectionNameResolver.h"
 #include "Utils/Cursor.h"
 #include "Utils/CursorRepository.h"
-#include "Transaction/V8Context.h"
 #include "V8/v8-conv.h"
+#include "V8/v8-globals.h"
+#include "V8/v8-utils.h"
 #include "V8/v8-vpack.h"
-#include "V8Server/v8-voccursor.h"
+#include "v8-vocbaseprivate.h"
+
+#include <velocypack/Iterator.h>
+#include <velocypack/velocypack-aliases.h>
+
+#include "Logger/Logger.h"
 
 using namespace arangodb;
 using namespace arangodb::basics;
-using namespace arangodb::rest;
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief generates a general cursor from an array
@@ -41,12 +52,7 @@ using namespace arangodb::rest;
 static void JS_CreateCursor(v8::FunctionCallbackInfo<v8::Value> const& args) {
   TRI_V8_TRY_CATCH_BEGIN(isolate);
   v8::HandleScope scope(isolate);
-
-  TRI_vocbase_t* vocbase = GetContextVocBase(isolate);
-
-  if (vocbase == nullptr) {
-    TRI_V8_THROW_EXCEPTION(TRI_ERROR_ARANGO_DATABASE_NOT_FOUND);
-  }
+  auto& vocbase = GetContextVocBase(isolate);
 
   if (args.Length() < 1) {
     TRI_V8_THROW_EXCEPTION_USAGE("CREATE_CURSOR(<data>, <batchSize>, <ttl>)");
@@ -70,7 +76,6 @@ static void JS_CreateCursor(v8::FunctionCallbackInfo<v8::Value> const& args) {
 
   if (args.Length() >= 2) {
     int64_t maxValue = TRI_ObjectToInt64(args[1]);
-
     if (maxValue > 0 && maxValue < (int64_t)UINT32_MAX) {
       batchSize = static_cast<uint32_t>(maxValue);
     }
@@ -85,10 +90,9 @@ static void JS_CreateCursor(v8::FunctionCallbackInfo<v8::Value> const& args) {
     ttl = 30.0;  // default ttl
   }
 
-  // create a cursor
-  auto cursors = vocbase->cursorRepository();
-
+  auto* cursors = vocbase.cursorRepository();  // create a cursor
   arangodb::aql::QueryResult result(TRI_ERROR_NO_ERROR);
+
   result.result = builder;
   result.cached = false;
   result.context = transaction::V8Context::Create(vocbase, false);
@@ -96,12 +100,15 @@ static void JS_CreateCursor(v8::FunctionCallbackInfo<v8::Value> const& args) {
   TRI_ASSERT(builder.get() != nullptr);
 
   try {
-    arangodb::Cursor* cursor = cursors->createFromQueryResult(
-        std::move(result), static_cast<size_t>(batchSize), nullptr, ttl, true);
+    arangodb::Cursor* cursor =
+        cursors->createFromQueryResult(std::move(result),
+                                       static_cast<size_t>(batchSize), ttl, true);
 
     TRI_ASSERT(cursor != nullptr);
-    auto id = cursor->id(); // need to fetch id before release() as release() will delete the cursor
-    cursors->release(cursor);
+    TRI_DEFER(cursors->release(cursor));
+
+    // need to fetch id before release() as release() might delete the cursor
+    CursorId id = cursor->id();
 
     auto result = TRI_V8UInt64String<TRI_voc_tick_t>(isolate, id);
     TRI_V8_RETURN(result);
@@ -118,27 +125,23 @@ static void JS_CreateCursor(v8::FunctionCallbackInfo<v8::Value> const& args) {
 static void JS_JsonCursor(v8::FunctionCallbackInfo<v8::Value> const& args) {
   TRI_V8_TRY_CATCH_BEGIN(isolate);
   v8::HandleScope scope(isolate);
-
-  TRI_vocbase_t* vocbase = GetContextVocBase(isolate);
-
-  if (vocbase == nullptr) {
-    TRI_V8_THROW_EXCEPTION(TRI_ERROR_ARANGO_DATABASE_NOT_FOUND);
-  }
+  auto& vocbase = GetContextVocBase(isolate);
 
   if (args.Length() != 1) {
     TRI_V8_THROW_EXCEPTION_USAGE("JSON_CURSOR(<id>)");
   }
 
   std::string const id = TRI_ObjectToString(args[0]);
-  auto cursorId = static_cast<arangodb::CursorId>(
-      arangodb::basics::StringUtils::uint64(id));
+  auto cursorId =
+      static_cast<arangodb::CursorId>(arangodb::basics::StringUtils::uint64(id));
 
   // find the cursor
-  auto cursors = vocbase->cursorRepository();
+  auto cursors = vocbase.cursorRepository();
   TRI_ASSERT(cursors != nullptr);
 
   bool busy;
-  auto cursor = cursors->find(cursorId, Cursor::CURSOR_VPACK, busy);
+  Cursor* cursor = cursors->find(cursorId, Cursor::CURSOR_VPACK, busy);
+  TRI_DEFER(cursors->release(cursor));
 
   if (cursor == nullptr) {
     if (busy) {
@@ -148,60 +151,432 @@ static void JS_JsonCursor(v8::FunctionCallbackInfo<v8::Value> const& args) {
     TRI_V8_THROW_EXCEPTION(TRI_ERROR_CURSOR_NOT_FOUND);
   }
 
-  try {
-    auto result = v8::Object::New(isolate);
-
-    // build documents
-    auto docs = v8::Array::New(isolate);
-    size_t const n = cursor->batchSize();
-
-    for (size_t i = 0; i < n; ++i) {
-      if (!cursor->hasNext()) {
-        break;
-      }
-
-      auto row = cursor->next();
-
-      if (row.isNone()) {
-        TRI_V8_THROW_EXCEPTION(TRI_ERROR_OUT_OF_MEMORY);
-      }
-
-      docs->Set(static_cast<uint32_t>(i), TRI_VPackToV8(isolate, row));
-    }
-
-    result->ForceSet(TRI_V8_ASCII_STRING(isolate, "result"), docs);
-
-    bool hasCount = cursor->hasCount();
-    size_t count = cursor->count();
-    bool hasNext = cursor->hasNext();
-    VPackSlice const extra = cursor->extra();
-
-    result->ForceSet(TRI_V8_ASCII_STRING(isolate, "hasMore"),
-                     v8::Boolean::New(isolate, hasNext));
-
-    if (hasNext) {
-      result->ForceSet(TRI_V8_ASCII_STRING(isolate, "id"),
-                       TRI_V8UInt64String<TRI_voc_tick_t>(isolate, cursor->id()));
-    }
-
-    if (hasCount) {
-      result->ForceSet(TRI_V8_ASCII_STRING(isolate, "count"),
-                       v8::Number::New(isolate, static_cast<double>(count)));
-    }
-    if (!extra.isNone()) {
-      result->ForceSet(TRI_V8_ASCII_STRING(isolate, "extra"),
-                       TRI_VPackToV8(isolate, extra));
-    }
-
-    cursors->release(cursor);
-
-    TRI_V8_RETURN(result);
-  } catch (...) {
-    cursors->release(cursor);
-    TRI_V8_THROW_EXCEPTION_MEMORY();
+  VPackOptions* opts = cursor->context()->getVPackOptions();
+  VPackBuilder builder(opts);
+  builder.openObject(true);  // conversion uses sequential iterator, no indexing
+  Result r = cursor->dumpSync(builder);
+  if (r.fail()) {
+    TRI_V8_THROW_EXCEPTION_MEMORY();  // for compatibility
   }
+  builder.close();
+
+  v8::Handle<v8::Value> result = TRI_VPackToV8(isolate, builder.slice());
+  TRI_V8_RETURN(result);
   TRI_V8_TRY_CATCH_END
 }
+
+// .............................................................................
+// cursor v8 class
+// .............................................................................
+
+struct V8Cursor final {
+  static constexpr uint16_t CID = 4956;
+
+  V8Cursor(v8::Isolate* isolate, v8::Handle<v8::Object> holder,
+           TRI_vocbase_t& vocbase, CursorId cursorId)
+      : _isolate(isolate),
+        _cursorId(cursorId),
+        _resolver(vocbase),
+        _cte(transaction::Context::createCustomTypeHandler(vocbase, _resolver)) {
+    // sanity checks
+    TRI_ASSERT(_handle.IsEmpty());
+    TRI_ASSERT(holder->InternalFieldCount() > 0);
+
+    // create a new persistent handle
+    holder->SetAlignedPointerInInternalField(0, this);
+    _handle.Reset(_isolate, holder);
+    _handle.SetWrapperClassId(CID);
+
+    // and make it weak, so that we can garbage collect
+    _handle.SetWeak(&_handle, weakCallback, v8::WeakCallbackType::kFinalizer);
+    _options.customTypeHandler = _cte.get();
+  }
+
+  ~V8Cursor() {
+    if (!_handle.IsEmpty()) {
+      TRI_ASSERT(_handle.IsNearDeath());
+
+      _handle.ClearWeak();
+      v8::Local<v8::Object> data = v8::Local<v8::Object>::New(_isolate, _handle);
+      data->SetInternalField(0, v8::Undefined(_isolate));
+      _handle.Reset();
+    }
+    if (_isolate) {
+      TRI_GET_GLOBALS2(_isolate);
+      TRI_vocbase_t* vocbase = v8g->_vocbase;
+      if (vocbase) {
+        CursorRepository* cursors = vocbase->cursorRepository();
+        cursors->remove(_cursorId, Cursor::CURSOR_VPACK);
+      }
+    }
+  }
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief unwraps a structure
+  //////////////////////////////////////////////////////////////////////////////
+
+  static V8Cursor* unwrap(v8::Local<v8::Object> handle) {
+    TRI_ASSERT(handle->InternalFieldCount() > 0);
+    return static_cast<V8Cursor*>(handle->GetAlignedPointerFromInternalField(0));
+  }
+
+  /// @brief return false on error
+  bool maybeFetchBatch(v8::Isolate* isolate) {
+    if (_dataIterator == nullptr && _hasMore) {  // fetch more data
+      TRI_GET_GLOBALS();
+      CursorRepository* cursors = v8g->_vocbase->cursorRepository();
+      bool busy;
+      Cursor* cc = cursors->find(_cursorId, Cursor::CURSOR_VPACK, busy);
+      if (busy || cc == nullptr) {
+        TRI_V8_SET_ERROR(TRI_errno_string(TRI_ERROR_CURSOR_BUSY));
+        return false;  // someone else is using it
+      }
+      TRI_DEFER(cc->release());
+
+      Result r = fetchData(cc);
+      if (r.fail()) {
+        TRI_CreateErrorObject(isolate, r);
+        return false;
+      }
+    }
+    return true; // still got some data
+  }
+
+  /// @brief fetch the next batch
+  Result fetchData(Cursor* cursor) {
+    TRI_ASSERT(cursor != nullptr && cursor->isUsed());
+
+    TRI_ASSERT(_hasMore);
+    TRI_ASSERT(_dataIterator == nullptr);
+    _dataSlice = VPackSlice::noneSlice();
+    _extraSlice = VPackSlice::noneSlice();
+
+    _tmpResult.clear();
+    _tmpResult.openObject();
+    Result r = cursor->dumpSync(_tmpResult);
+    if (r.fail()) {
+      return r;
+    }
+    _tmpResult.close();
+
+    TRI_ASSERT(_tmpResult.slice().isObject());
+    // TODO as an optimization
+    for (auto pair : VPackObjectIterator(_tmpResult.slice(), true)) {
+      if (pair.key.isEqualString("result")) {
+        _dataSlice = pair.value;
+        TRI_ASSERT(_dataSlice.isArray());
+        if (!_dataSlice.isEmptyArray()) {
+          _dataIterator = std::make_unique<VPackArrayIterator>(_dataSlice);
+        }
+      } else if (pair.key.isEqualString("hasMore")) {
+        _hasMore = pair.value.getBool();
+      } else if (pair.key.isEqualString("extra")) {
+        _extraSlice = pair.value;
+      }
+    }
+    // cursor should delete itself
+    TRI_ASSERT(_hasMore || cursor->isDeleted());
+    return Result{};
+  }
+
+  ////////////////////////////////////////////////////////////////////////////////
+  /// @brief constructs a new streaming cursor from arguments
+  ////////////////////////////////////////////////////////////////////////////////
+
+  static void New(v8::FunctionCallbackInfo<v8::Value> const& args) {
+    TRI_V8_TRY_CATCH_BEGIN(isolate);
+    TRI_GET_GLOBALS();
+
+    if (!args.IsConstructCall()) {  // if not call as a constructor call it
+      TRI_V8_THROW_EXCEPTION_USAGE("only instance-able by constructor");
+    }
+
+    if (args.Length() < 1 || args.Length() > 3) {
+      TRI_V8_THROW_EXCEPTION_USAGE(
+          "ArangoQueryStreamCursor(<queryString>, <bindVars>, <options>)");
+    }
+
+    // get the query string
+    if (!args[0]->IsString()) {
+      TRI_V8_THROW_TYPE_ERROR("expecting string for <queryString>");
+    }
+    std::string const queryString(TRI_ObjectToString(args[0]));
+
+    // bind parameters
+    std::shared_ptr<VPackBuilder> bindVars;
+
+    if (args.Length() > 1) {
+      if (!args[1]->IsUndefined() && !args[1]->IsNull() && !args[1]->IsObject()) {
+        TRI_V8_THROW_TYPE_ERROR("expecting object for <bindVars>");
+      }
+      if (args[1]->IsObject()) {
+        bindVars.reset(new VPackBuilder);
+        int res = TRI_V8ToVPack(isolate, *(bindVars.get()), args[1], false);
+
+        if (res != TRI_ERROR_NO_ERROR) {
+          TRI_V8_THROW_EXCEPTION(res);
+        }
+      }
+    }
+
+    // options
+    auto options = std::make_shared<VPackBuilder>();
+    if (args.Length() > 2) {
+      // we have options! yikes!
+      if (!args[2]->IsObject()) {
+        TRI_V8_THROW_TYPE_ERROR("expecting object for <options>");
+      }
+
+      int res = TRI_V8ToVPack(isolate, *options, args[2], false);
+      if (res != TRI_ERROR_NO_ERROR) {
+        TRI_V8_THROW_EXCEPTION(res);
+      }
+    } else {
+      VPackObjectBuilder guard(options.get());
+    }
+    size_t batchSize =
+        VelocyPackHelper::getNumericValue<size_t>(options->slice(), "batchSize", 1000);
+
+    const bool contextOwnedByExterior = transaction::V8Context::isEmbedded();
+    TRI_vocbase_t* vocbase = v8g->_vocbase;
+    TRI_ASSERT(vocbase != nullptr);
+    auto* cursors = vocbase->cursorRepository();  // create a cursor
+    double ttl = std::numeric_limits<double>::max();
+    // specify ID 0 so it uses the external V8 context
+    auto cc = cursors->createQueryStream(queryString, std::move(bindVars),
+                                         std::move(options), batchSize, ttl,
+                                         contextOwnedByExterior);
+    TRI_DEFER(cc->release());
+    // args.Holder() is supposedly better than args.This()
+    auto self = std::make_unique<V8Cursor>(isolate, args.Holder(), *vocbase, cc->id());
+    Result r = self->fetchData(cc);
+    self.release(); // args.Holder() owns the pointer
+    if (r.fail()) {
+      TRI_V8_THROW_EXCEPTION(r);
+    } else {
+      TRI_V8_RETURN(args.This());
+    }
+    // do not delete self, its owned by V8 now
+
+    TRI_V8_RETURN(args.This());
+    TRI_V8_TRY_CATCH_END
+  }
+
+  ////////////////////////////////////////////////////////////////////////////////
+  /// @brief ArangoQueryStreamCursor.prototype.toArray = ...
+  ////////////////////////////////////////////////////////////////////////////////
+
+  static void toArray(v8::FunctionCallbackInfo<v8::Value> const& args) {
+    TRI_V8_TRY_CATCH_BEGIN(isolate);
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::HandleScope scope(isolate);
+    
+    V8Cursor* self = V8Cursor::unwrap(args.Holder());
+    if (self == nullptr) {
+      TRI_V8_RETURN_UNDEFINED();
+    }
+    
+    v8::Handle<v8::Array> resArray = v8::Array::New(isolate);
+    
+    // iterate over result and return it
+    uint32_t j = 0;
+    while (self->maybeFetchBatch(isolate)) {
+      if (!self->_dataIterator) {
+        break;
+      }
+      
+      if (V8PlatformFeature::isOutOfMemory(isolate)) {
+        TRI_V8_SET_EXCEPTION_MEMORY();
+        break;
+      }
+      
+      while (self->_dataIterator->valid()) {
+        VPackSlice s = self->_dataIterator->value();
+        resArray->Set(j++, TRI_VPackToV8(isolate, s, &self->_options));
+        ++(*self->_dataIterator);
+      }
+      // reset so that the next one can fetch again
+      self->_dataIterator.reset();
+    }
+    TRI_V8_RETURN(resArray);
+    
+    TRI_V8_TRY_CATCH_END
+  }
+
+  ////////////////////////////////////////////////////////////////////////////////
+  /// @brief ArangoQueryStreamCursor.prototype.getExtra = ...
+  ////////////////////////////////////////////////////////////////////////////////
+
+  static void getExtra(v8::FunctionCallbackInfo<v8::Value> const& args) {
+    TRI_V8_TRY_CATCH_BEGIN(isolate);
+    v8::HandleScope scope(isolate);
+
+    V8Cursor* self = V8Cursor::unwrap(args.Holder());
+    if (self == nullptr) {
+      TRI_V8_RETURN(v8::Undefined(isolate));
+    }
+
+    // we always need to fetch
+    if (!self->maybeFetchBatch(isolate)) {  // sets exception
+      return;
+    }
+
+    if (self->_extraSlice.isObject()) {
+      TRI_V8_RETURN(TRI_VPackToV8(isolate, self->_extraSlice));
+    }
+
+    TRI_V8_THROW_EXCEPTION_MESSAGE(
+        TRI_ERROR_BAD_PARAMETER,
+        "getExtra() is only valid after all data has been fetched");
+    TRI_V8_TRY_CATCH_END
+  }
+
+  ////////////////////////////////////////////////////////////////////////////////
+  /// @brief ArangoQueryStreamCursor.prototype.hasNext = ...
+  ////////////////////////////////////////////////////////////////////////////////
+
+  static void hasNext(v8::FunctionCallbackInfo<v8::Value> const& args) {
+    TRI_V8_TRY_CATCH_BEGIN(isolate);
+    v8::HandleScope scope(isolate);
+
+    V8Cursor* self = V8Cursor::unwrap(args.Holder());
+    if (self == nullptr) {
+      TRI_V8_RETURN_UNDEFINED();
+    }
+
+    // we always need to fetch
+    if (!self->maybeFetchBatch(isolate)) {  // sets exception
+      return;
+    }
+
+    if (self->_dataIterator != nullptr) {
+      TRI_V8_RETURN_TRUE();
+    } else {
+      TRI_V8_RETURN_FALSE();
+    }
+    
+    TRI_V8_TRY_CATCH_END
+  }
+
+  ////////////////////////////////////////////////////////////////////////////////
+  /// @brief ArangoQueryStreamCursor.prototype.next = ...
+  ////////////////////////////////////////////////////////////////////////////////
+
+  static void next(v8::FunctionCallbackInfo<v8::Value> const& args) {
+    TRI_V8_TRY_CATCH_BEGIN(isolate);
+    v8::HandleScope scope(isolate);
+
+    V8Cursor* self = V8Cursor::unwrap(args.Holder());
+    if (self == nullptr) {
+      TRI_V8_RETURN_UNDEFINED();
+    }
+
+    // we always need to fetch
+    if (!self->maybeFetchBatch(isolate)) {  // sets exception
+      return;
+    }
+
+    if (self->_dataIterator) {  // got a current batch
+      TRI_ASSERT(self->_dataIterator->valid());
+
+      VPackSlice s = self->_dataIterator->value();
+      v8::Local<v8::Value> val = TRI_VPackToV8(isolate, s, &self->_options);
+
+      ++(*self->_dataIterator);
+      // reset so that the next one can fetch again
+      if (!self->_dataIterator->valid()) {
+        self->_dataIterator.reset();
+      }
+      TRI_V8_RETURN(val);
+    }
+
+    TRI_V8_RETURN_UNDEFINED();
+    TRI_V8_TRY_CATCH_END
+  }
+
+  ////////////////////////////////////////////////////////////////////////////////
+  /// @brief ArangoQueryStreamCursor.prototype.count = ...
+  ////////////////////////////////////////////////////////////////////////////////
+
+  static void count(v8::FunctionCallbackInfo<v8::Value> const& args) {
+    TRI_V8_TRY_CATCH_BEGIN(isolate);
+    v8::HandleScope scope(isolate);
+    TRI_V8_RETURN_UNDEFINED();  // always undefined
+    TRI_V8_TRY_CATCH_END
+  }
+
+  ////////////////////////////////////////////////////////////////////////////////
+  /// @brief explicitly discard cursor, mostly relevant for testing
+  ////////////////////////////////////////////////////////////////////////////////
+
+  static void dispose(v8::FunctionCallbackInfo<v8::Value> const& args) {
+    TRI_V8_TRY_CATCH_BEGIN(isolate);
+    V8Cursor* self = V8Cursor::unwrap(args.Holder());
+    if (self != nullptr) {
+      TRI_GET_GLOBALS();
+      CursorRepository* cursors = v8g->_vocbase->cursorRepository();
+      cursors->remove(self->_cursorId, Cursor::CURSOR_VPACK);
+      self->_hasMore = false;
+      self->_dataSlice = VPackSlice::noneSlice();
+      self->_extraSlice = VPackSlice::noneSlice();
+      self->_dataIterator.reset();
+      self->_tmpResult.clear();
+    }
+    TRI_V8_TRY_CATCH_END
+  }
+
+  ////////////////////////////////////////////////////////////////////////////////
+  /// @brief ArangoQueryStreamCursor.prototype.id = ...
+  ////////////////////////////////////////////////////////////////////////////////
+
+  static void id(v8::FunctionCallbackInfo<v8::Value> const& args) {
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::HandleScope scope(isolate);
+    V8Cursor* self = V8Cursor::unwrap(args.Holder());
+    if (self == nullptr) {
+      TRI_V8_RETURN(v8::Undefined(isolate));
+    }
+    TRI_V8_RETURN(v8::Integer::New(isolate, self->_cursorId));
+  }
+
+ private:
+  /// called when GC deletes the value
+  static void weakCallback(const v8::WeakCallbackInfo<v8::Persistent<v8::Object>>& data) {
+    auto isolate = data.GetIsolate();
+    auto persistent = data.GetParameter();
+    auto myPointer = v8::Local<v8::Object>::New(isolate, *persistent);
+
+    TRI_ASSERT(myPointer->InternalFieldCount() > 0);
+    V8Cursor* obj = V8Cursor::unwrap(myPointer);
+    TRI_ASSERT(obj);
+
+    TRI_ASSERT(persistent == &obj->_handle);
+    TRI_ASSERT(persistent->IsNearDeath());
+    delete obj;
+  }
+
+ private:
+  /// @brief persistent handle for V8 object
+  v8::Persistent<v8::Object> _handle;
+  /// @brief isolate
+  v8::Isolate* _isolate;
+  /// @brief temporary result buffer
+  VPackBuilder _tmpResult;
+  /// @brief id of cursor
+  CursorId _cursorId;
+
+  /// cache has more variable
+  bool _hasMore = true;
+  VPackSlice _dataSlice = VPackSlice::noneSlice();
+  /// cached extras which might be attached to the stream
+  VPackSlice _extraSlice = VPackSlice::noneSlice();
+  /// @brief pointer to the current result
+  std::unique_ptr<VPackArrayIterator> _dataIterator;
+
+  CollectionNameResolver _resolver;
+  std::shared_ptr<VPackCustomTypeHandler> _cte;
+  VPackOptions _options = VPackOptions::Defaults;
+};
 
 // .............................................................................
 // generate the general cursor template
@@ -211,10 +586,49 @@ void TRI_InitV8cursor(v8::Handle<v8::Context> context, TRI_v8_global_t* v8g) {
   v8::Isolate* isolate = v8::Isolate::GetCurrent();
 
   // cursor functions. not intended to be used by end users
+  // these cursor functions are the APIs implemented in js/actions/api-simple.js
   TRI_AddGlobalFunctionVocbase(isolate,
                                TRI_V8_ASCII_STRING(isolate, "CREATE_CURSOR"),
                                JS_CreateCursor, true);
   TRI_AddGlobalFunctionVocbase(isolate,
                                TRI_V8_ASCII_STRING(isolate, "JSON_CURSOR"),
                                JS_JsonCursor, true);
+
+  // streaming query cursor class, intended to be used via
+  // ArangoStatement.execute
+  v8::Handle<v8::ObjectTemplate> rt;
+  v8::Handle<v8::FunctionTemplate> ft;
+
+  ft = v8::FunctionTemplate::New(isolate, V8Cursor::New);
+  ft->SetClassName(TRI_V8_ASCII_STRING(isolate, "ArangoQueryStreamCursor"));
+
+  rt = ft->InstanceTemplate();
+  rt->SetInternalFieldCount(1);
+
+  ft->PrototypeTemplate()->Set(TRI_V8_ASCII_STRING(isolate, "isArangoResultSet"),
+                               v8::True(isolate));
+  TRI_V8_AddProtoMethod(isolate, ft, TRI_V8_ASCII_STRING(isolate, "toArray"),
+                        V8Cursor::toArray);
+  TRI_V8_AddProtoMethod(isolate, ft, TRI_V8_ASCII_STRING(isolate, "getExtra"),
+                        V8Cursor::getExtra);
+  TRI_V8_AddProtoMethod(isolate, ft, TRI_V8_ASCII_STRING(isolate, "hasNext"),
+                        V8Cursor::hasNext);
+  TRI_V8_AddProtoMethod(isolate, ft, TRI_V8_ASCII_STRING(isolate, "next"), V8Cursor::next);
+  TRI_V8_AddProtoMethod(isolate, ft, TRI_V8_ASCII_STRING(isolate, "count"), V8Cursor::count);
+  TRI_V8_AddProtoMethod(isolate, ft, TRI_V8_ASCII_STRING(isolate, "dispose"),
+                        V8Cursor::dispose);
+  TRI_V8_AddProtoMethod(isolate, ft, TRI_V8_ASCII_STRING(isolate, "id"), V8Cursor::id);
+
+  v8g->StreamQueryCursorTempl.Reset(isolate, ft);
+  v8::MaybeLocal<v8::Function> ctor = ft->GetFunction(context);
+  if (ctor.IsEmpty()) {
+    THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_INTERNAL,
+                                   "error creating v8 stream cursor");
+  }
+  // ft->SetClassName(TRI_V8_ASCII_STRING(isolate,
+  // "ArangoStreamQueryCursorCtor"));
+  TRI_AddGlobalFunctionVocbase(isolate,
+                               TRI_V8_ASCII_STRING(isolate,
+                                                   "ArangoQueryStreamCursor"),
+                               ctor.ToLocalChecked(), true);
 }

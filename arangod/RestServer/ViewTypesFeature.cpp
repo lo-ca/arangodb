@@ -23,47 +23,87 @@
 #include "ViewTypesFeature.h"
 
 #include "ApplicationFeatures/ApplicationServer.h"
+#include "BootstrapFeature.h"
 #include "ProgramOptions/ProgramOptions.h"
 #include "ProgramOptions/Section.h"
-#include "Views/LoggerView.h"
 
-using namespace arangodb;
-using namespace arangodb::application_features;
-using namespace arangodb::basics;
-using namespace arangodb::options;
+namespace {
 
-std::unordered_map<std::string, arangodb::ViewCreator>
-    ViewTypesFeature::_viewCreators;
-
-ViewTypesFeature::ViewTypesFeature(ApplicationServer* server)
-    : ApplicationFeature(server, "ViewTypes") {
-  setOptional(false);
-  requiresElevatedPrivileges(false);
-  startsAfter("WorkMonitor");
-}
-
-void ViewTypesFeature::prepare() {
-  // register the "logger" example view type
-  registerViewImplementation(LoggerView::type, LoggerView::creator);
-}
-
-void ViewTypesFeature::unprepare() { _viewCreators.clear(); }
-
-void ViewTypesFeature::registerViewImplementation(std::string const& type,
-                                                  ViewCreator creator) {
-  _viewCreators.emplace(type, creator);
-}
-
-bool ViewTypesFeature::isValidType(std::string const& type) const {
-  return (_viewCreators.find(type) != _viewCreators.end());
-}
-
-ViewCreator& ViewTypesFeature::creator(std::string const& type) const {
-  auto it = _viewCreators.find(type);
-
-  if (it == _viewCreators.end()) {
-    THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_BAD_PARAMETER,
-                                   "no handler found for view type");
+struct InvalidViewFactory : public arangodb::ViewFactory {
+  virtual arangodb::Result create(arangodb::LogicalView::ptr&, TRI_vocbase_t&,
+                                  arangodb::velocypack::Slice const& definition) const override {
+    return arangodb::Result(
+        TRI_ERROR_BAD_PARAMETER,
+        std::string(
+            "failure to create view without a factory for definition: ") +
+            definition.toString());
   }
-  return (*it).second;
+
+  virtual arangodb::Result instantiate(arangodb::LogicalView::ptr&, TRI_vocbase_t&,
+                                       arangodb::velocypack::Slice const& definition,
+                                       uint64_t) const override {
+    return arangodb::Result(
+        TRI_ERROR_BAD_PARAMETER,
+        std::string(
+            "failure to instantiate view without a factory for definition: ") +
+            definition.toString());
+  }
+};
+
+std::string const FEATURE_NAME("ViewTypes");
+InvalidViewFactory const INVALID;
+
+}  // namespace
+
+namespace arangodb {
+
+ViewTypesFeature::ViewTypesFeature(application_features::ApplicationServer& server)
+    : application_features::ApplicationFeature(server, ViewTypesFeature::name()) {
+  setOptional(false);
+  startsAfter("BasicsPhase");
 }
+
+Result ViewTypesFeature::emplace(LogicalDataSource::Type const& type,
+                                 ViewFactory const& factory) {
+  auto* feature = arangodb::application_features::ApplicationServer::lookupFeature(
+      "Bootstrap");
+  auto* bootstrapFeature = dynamic_cast<BootstrapFeature*>(feature);
+
+  // ensure new factories are not added at runtime since that would require
+  // additional locks
+  if (bootstrapFeature && bootstrapFeature->isReady()) {
+    return arangodb::Result(
+        TRI_ERROR_INTERNAL,
+        std::string(
+            "view factory registration is only allowed during server startup"));
+  }
+
+  if (!_factories.emplace(&type, &factory).second) {
+    return arangodb::Result(TRI_ERROR_ARANGO_DUPLICATE_IDENTIFIER, std::string("view factory previously registered during view factory "
+                                                                               "registration for view type '") +
+                                                                       type.name() +
+                                                                       "'");
+  }
+
+  return arangodb::Result();
+}
+
+ViewFactory const& ViewTypesFeature::factory(LogicalDataSource::Type const& type) const noexcept {
+  auto itr = _factories.find(&type);
+  TRI_ASSERT(itr == _factories.end() || false == !(itr->second));  // ViewTypesFeature::emplace(...)
+                                                                   // inserts non-nullptr
+
+  return itr == _factories.end() ? INVALID : *(itr->second);
+}
+
+/*static*/ std::string const& ViewTypesFeature::name() { return FEATURE_NAME; }
+
+void ViewTypesFeature::prepare() {}
+
+void ViewTypesFeature::unprepare() { _factories.clear(); }
+
+}  // namespace arangodb
+
+// -----------------------------------------------------------------------------
+// --SECTION--                                                       END-OF-FILE
+// -----------------------------------------------------------------------------

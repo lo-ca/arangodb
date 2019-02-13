@@ -34,39 +34,30 @@ class ManagedDocumentResult;
 namespace graph {
 class ShortestPathFinder;
 class ShortestPathResult;
-}
+}  // namespace graph
 
 namespace aql {
 
 class ShortestPathNode;
 
-class ShortestPathBlock : public ExecutionBlock {
-
+class ShortestPathBlock final : public ExecutionBlock {
  public:
   ShortestPathBlock(ExecutionEngine* engine, ShortestPathNode const* ep);
 
-  ~ShortestPathBlock();
-
-  /// @brief initialize, here we fetch all docs from the database
-  int initialize() override;
-
   /// @brief initializeCursor
-  int initializeCursor(AqlItemBlock* items, size_t pos) override;
+  std::pair<ExecutionState, Result> initializeCursor(AqlItemBlock* items, size_t pos) override;
 
-  int shutdown(int errorCode) override;
+  std::pair<ExecutionState, Result> shutdown(int errorCode) override;
 
   /// @brief getSome
-  AqlItemBlock* getSome(size_t atLeast, size_t atMost) override final;
+  std::pair<ExecutionState, std::unique_ptr<AqlItemBlock>> getSome(size_t atMost) override final;
 
-  // skip between atLeast and atMost, returns the number actually skipped . . .
-  // will only return less than atLeast if there aren't atLeast many
+  // skip atMost documents, returns the number actually skipped . . .
+  // will only return less than atMost if there aren't atMost many
   // things to skip overall.
-  size_t skipSome(size_t atLeast, size_t atMost) override final;
+  std::pair<ExecutionState, size_t> skipSome(size_t atMost) override final;
 
  private:
-
-  /// SECTION private Functions
-
   /// @brief Compute the next shortest path
   bool nextPath(AqlItemBlock const*);
 
@@ -89,7 +80,7 @@ class ShortestPathBlock : public ExecutionBlock {
 
   /// @brief Register for the edge output
   RegisterId _edgeReg;
-  
+
   /// @brief options to compute the shortest path
   graph::ShortestPathOptions* _opts;
 
@@ -136,9 +127,8 @@ class ShortestPathBlock : public ExecutionBlock {
 
   /// @brief Traverser Engines
   std::unordered_map<ServerID, traverser::TraverserEngineID> const* _engines;
-
 };
 
-} // namespace arangodb::aql
-} // namespace arangodb
+}  // namespace aql
+}  // namespace arangodb
 #endif

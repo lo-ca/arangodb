@@ -75,12 +75,6 @@ bool TRI_CaseEqualString(char const* left, char const* right, size_t n);
 bool TRI_IsPrefixString(char const* full, char const* prefix);
 
 ////////////////////////////////////////////////////////////////////////////////
-/// @brief tests if second string is contained in the first
-////////////////////////////////////////////////////////////////////////////////
-
-bool TRI_IsContainedString(char const* full, char const* part);
-
-////////////////////////////////////////////////////////////////////////////////
 /// @brief tests if second string is contained in the first, byte-safe
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -111,26 +105,13 @@ void TRI_CopyString(char* dst, char const* src, size_t length);
 /// @brief concatenate three strings using a memory zone
 ////////////////////////////////////////////////////////////////////////////////
 
-char* TRI_Concatenate3String(char const*, char const*,
-                             char const*);
+char* TRI_Concatenate3String(char const*, char const*, char const*);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief frees a string
 ////////////////////////////////////////////////////////////////////////////////
 
 void TRI_FreeString(char*);
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief converts into hex representation
-////////////////////////////////////////////////////////////////////////////////
-
-char* TRI_EncodeHexString(char const* source, size_t sourceLen, size_t* dstLen);
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief converts from hex representation
-////////////////////////////////////////////////////////////////////////////////
-
-char* TRI_DecodeHexString(char const* source, size_t sourceLen, size_t* dstLen);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief sha256 of a string
@@ -144,16 +125,15 @@ char* TRI_SHA256String(char const* source, size_t sourceLen, size_t* dstLen);
 ////////////////////////////////////////////////////////////////////////////////
 
 constexpr size_t TRI_MaxLengthEscapeControlsCString(size_t inLength) {
-  return (4 * inLength) + 2; // for newline and 0 byte
+  return (4 * inLength) + 2;  // for newline and 0 byte
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief escapes special characters using C escapes
 ////////////////////////////////////////////////////////////////////////////////
 
-char* TRI_EscapeControlsCString(char const* in,
-                                size_t inLength, size_t* outLength,
-                                bool appendNewline);
+char* TRI_EscapeControlsCString(char const* in, size_t inLength,
+                                size_t* outLength, bool appendNewline);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief escapes special characters using C escapes
@@ -161,9 +141,8 @@ char* TRI_EscapeControlsCString(char const* in,
 /// the result of at most (4 * inLength) + 2 bytes!
 ////////////////////////////////////////////////////////////////////////////////
 
-char* TRI_EscapeControlsCString(char const* in, size_t inLength, 
-                                char* out, size_t* outLength,
-                                bool appendNewline);
+char* TRI_EscapeControlsCString(char const* in, size_t inLength, char* out,
+                                size_t* outLength, bool appendNewline);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief escapes special characters using unicode escapes
@@ -173,8 +152,8 @@ char* TRI_EscapeControlsCString(char const* in, size_t inLength,
 /// escape the character '/'.
 ////////////////////////////////////////////////////////////////////////////////
 
-char* TRI_EscapeUtf8String(char const* in, size_t inLength,
-                           bool escapeSlash, size_t* outLength, bool);
+char* TRI_EscapeUtf8String(char const* in, size_t inLength, bool escapeSlash,
+                           size_t* outLength, bool);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief unescapes unicode escape sequences
@@ -183,15 +162,16 @@ char* TRI_EscapeUtf8String(char const* in, size_t inLength,
 /// sequence by unicode characters and representing them as UTF-8 sequences.
 ////////////////////////////////////////////////////////////////////////////////
 
-char* TRI_UnescapeUtf8String(char const* in,
-                             size_t inLength, size_t* outLength, bool normalize);
+char* TRI_UnescapeUtf8String(char const* in, size_t inLength, size_t* outLength, bool normalize);
 
 ////////////////////////////////////////////////////////////////////////////////
-/// @brief determine the number of characters in a UTF-8 string
-/// the UTF-8 string must be well-formed and end with a NUL terminator
+/// @brief unescapes unicode escape sequences into buffer "buffer".
+/// the buffer must be big enough to hold at least inLength + 1 bytes of chars
+/// returns the length of the unescaped string, excluding the trailing null
+/// byte
 ////////////////////////////////////////////////////////////////////////////////
 
-size_t TRI_CharLengthUtf8String(char const*);
+size_t TRI_UnescapeUtf8StringInPlace(char* buffer, char const* in, size_t inLength);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief determine the number of characters in a UTF-8 string

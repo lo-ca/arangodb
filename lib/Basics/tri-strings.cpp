@@ -22,52 +22,10 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include "tri-strings.h"
-#include "Basics/conversions.h"
 #include "Basics/Utf8Helper.h"
+#include "Basics/conversions.h"
+
 #include <openssl/sha.h>
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief hex values for all characters
-////////////////////////////////////////////////////////////////////////////////
-
-static char const HexValues[513] = {
-    "000102030405060708090a0b0c0d0e0f"
-    "101112131415161718191a1b1c1d1e1f"
-    "202122232425262728292a2b2c2d2e2f"
-    "303132333435363738393a3b3c3d3e3f"
-    "404142434445464748494a4b4c4d4e4f"
-    "505152535455565758595a5b5c5d5e5f"
-    "606162636465666768696a6b6c6d6e6f"
-    "707172737475767778797a7b7c7d7e7f"
-    "808182838485868788898a8b8c8d8e8f"
-    "909192939495969798999a9b9c9d9e9f"
-    "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
-    "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
-    "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf"
-    "d0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
-    "e0e1e2e3e4e5e6e7e8e9eaebecedeeef"
-    "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"};
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief integer values for all hex characters
-////////////////////////////////////////////////////////////////////////////////
-
-static uint8_t const HexDecodeLookup[256] = {
-    0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0,  0,  0,  0,  0,  1,  2, 3, 4, 5, 6, 7, 8, 9,  // 0123456789
-    0,  0,  0,  0,  0,  0,  0,                       // :;<=>?@
-    10, 11, 12, 13, 14, 15,                          // ABCDEF
-    0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0,     // GHIJKLMNOPQRS
-    0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0,     // TUVWXYZ[/]^_`
-    10, 11, 12, 13, 14, 15,                          // abcdef
-    0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief escapes UTF-8 range U+0000 to U+007F
@@ -212,8 +170,7 @@ static void EscapeUtf8Range10000T10FFFF(char** dst, char const** src) {
     uint16_t i3;
     uint16_t i4;
 
-    n = ((c & 0x0F) << 18) | ((d & 0x3F) << 12) | ((e & 0x3F) << 6) |
-        (f & 0x3F);
+    n = ((c & 0x0F) << 18) | ((d & 0x3F) << 12) | ((e & 0x3F) << 6) | (f & 0x3F);
     TRI_ASSERT(n >= 65536 && n <= 1114111);
 
     // construct the surrogate pairs
@@ -295,8 +252,7 @@ static void DecodeUnicodeEscape(char** dst, char const* src) {
 /// @brief decodes a unicode surrogate pair
 ////////////////////////////////////////////////////////////////////////////////
 
-static void DecodeSurrogatePair(char** dst, char const* src1,
-                                char const* src2) {
+static void DecodeSurrogatePair(char** dst, char const* src1, char const* src2) {
   int i1;
   int i2;
   int i3;
@@ -357,8 +313,7 @@ char* TRI_LowerAsciiString(char const* value) {
 
   length = strlen(value);
 
-  buffer = static_cast<char*>(
-      TRI_Allocate((sizeof(char) * length) + 1));
+  buffer = static_cast<char*>(TRI_Allocate((sizeof(char) * length) + 1));
 
   if (buffer == nullptr) {
     return nullptr;
@@ -397,8 +352,7 @@ char* TRI_UpperAsciiString(char const* value) {
 
   length = strlen(value);
 
-  buffer = static_cast<char*>(
-      TRI_Allocate((sizeof(char) * length) + 1));
+  buffer = static_cast<char*>(TRI_Allocate((sizeof(char) * length) + 1));
 
   if (buffer == nullptr) {
     return nullptr;
@@ -461,14 +415,6 @@ bool TRI_IsPrefixString(char const* full, char const* prefix) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-/// @brief tests if second string is contained in the first
-////////////////////////////////////////////////////////////////////////////////
-
-bool TRI_IsContainedString(char const* full, char const* part) {
-  return strstr(full, part) != nullptr;
-}
-
-////////////////////////////////////////////////////////////////////////////////
 /// @brief tests if second string is contained in the first, byte-safe
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -486,9 +432,8 @@ char* TRI_IsContainedMemory(char const* full, size_t fullLength,
   char const* end = full + fullLength - partLength;
 
   for (char const* p = full; p <= end; ++p) {
-    if (*p == *part &&
-        memcmp(static_cast<void const*>(p), static_cast<void const*>(part),
-               partLength) == 0) {
+    if (*p == *part && memcmp(static_cast<void const*>(p),
+                              static_cast<void const*>(part), partLength) == 0) {
       return const_cast<char*>(p);
     }
   }
@@ -515,8 +460,7 @@ char* TRI_DuplicateString(char const* value) {
 /// @brief duplicates a string of given length
 ////////////////////////////////////////////////////////////////////////////////
 
-char* TRI_DuplicateString(char const* value,
-                          size_t length) {
+char* TRI_DuplicateString(char const* value, size_t length) {
   char* result = static_cast<char*>(TRI_Allocate(length + 1));
 
   if (result != nullptr) {
@@ -540,14 +484,12 @@ void TRI_CopyString(char* dst, char const* src, size_t length) {
 /// @brief concatenate three strings using a memory zone
 ////////////////////////////////////////////////////////////////////////////////
 
-char* TRI_Concatenate3String(char const* a,
-                             char const* b, char const* c) {
+char* TRI_Concatenate3String(char const* a, char const* b, char const* c) {
   size_t na = strlen(a);
   size_t nb = strlen(b);
   size_t nc = strlen(c);
 
-  char* result =
-      static_cast<char*>(TRI_Allocate(na + nb + nc + 1));
+  char* result = static_cast<char*>(TRI_Allocate(na + nb + nc + 1));
 
   if (result != nullptr) {
     memcpy(result, a, na);
@@ -564,85 +506,14 @@ char* TRI_Concatenate3String(char const* a,
 /// @brief frees a string
 ////////////////////////////////////////////////////////////////////////////////
 
-void TRI_FreeString(char* value) {
-  TRI_Free(value);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief converts into hex representation
-////////////////////////////////////////////////////////////////////////////////
-
-char* TRI_EncodeHexString(char const* source, size_t sourceLen,
-                          size_t* dstLen) {
-  char* result;
-  uint16_t* hex;
-  uint16_t* dst;
-  uint8_t* src;
-  size_t j;
-
-  *dstLen = (sourceLen * 2);
-  dst = static_cast<uint16_t*>(
-      TRI_Allocate((*dstLen) + 1));
-  if (dst == nullptr) {
-    return nullptr;
-  }
-  result = (char*)dst;
-
-  hex = (uint16_t*)HexValues;
-  src = (uint8_t*)source;
-
-  for (j = 0; j < sourceLen; j++) {
-    *dst = hex[*src];
-    dst++;
-    src++;
-  }
-
-  *((char*)dst) = 0;  // terminate the string
-
-  return result;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief converts from hex representation
-////////////////////////////////////////////////////////////////////////////////
-
-char* TRI_DecodeHexString(char const* source, size_t sourceLen,
-                          size_t* dstLen) {
-  char* result;
-  uint8_t* dst;
-  uint8_t* src;
-  size_t j;
-
-  *dstLen = (sourceLen / 2);
-  dst = static_cast<uint8_t*>(
-      TRI_Allocate((*dstLen) + 1));
-  if (dst == nullptr) {
-    return nullptr;
-  }
-  result = (char*)dst;
-
-  src = (uint8_t*)source;
-
-  for (j = 0; j < sourceLen; j += 2) {
-    uint8_t d;
-    d = HexDecodeLookup[*src++] << 4;
-    d |= HexDecodeLookup[*src++];
-
-    *dst++ = d;
-  }
-
-  *dst = 0;  // terminate the string
-
-  return result;
-}
+void TRI_FreeString(char* value) { TRI_Free(value); }
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief sha256 of a string
 ////////////////////////////////////////////////////////////////////////////////
 
 char* TRI_SHA256String(char const* source, size_t sourceLen, size_t* dstLen) {
-  unsigned char* dst = static_cast<unsigned char*>(
-      TRI_Allocate(SHA256_DIGEST_LENGTH));
+  unsigned char* dst = static_cast<unsigned char*>(TRI_Allocate(SHA256_DIGEST_LENGTH));
   if (dst == nullptr) {
     return nullptr;
   }
@@ -657,11 +528,10 @@ char* TRI_SHA256String(char const* source, size_t sourceLen, size_t* dstLen) {
 /// @brief escapes special characters using C escapes
 ////////////////////////////////////////////////////////////////////////////////
 
-char* TRI_EscapeControlsCString(char const* in,
-                                size_t inLength, size_t* outLength,
-                                bool appendNewline) {
-  char* buffer = static_cast<char*>(
-      TRI_Allocate(TRI_MaxLengthEscapeControlsCString(inLength)));
+char* TRI_EscapeControlsCString(char const* in, size_t inLength,
+                                size_t* outLength, bool appendNewline) {
+  char* buffer =
+      static_cast<char*>(TRI_Allocate(TRI_MaxLengthEscapeControlsCString(inLength)));
 
   return TRI_EscapeControlsCString(in, inLength, buffer, outLength, appendNewline);
 }
@@ -672,9 +542,8 @@ char* TRI_EscapeControlsCString(char const* in,
 /// the result of at most (4 * inLength) + 2 bytes!
 ////////////////////////////////////////////////////////////////////////////////
 
-char* TRI_EscapeControlsCString(char const* in, size_t inLength, 
-                                char* out, size_t* outLength,
-                                bool appendNewline) {
+char* TRI_EscapeControlsCString(char const* in, size_t inLength, char* out,
+                                size_t* outLength, bool appendNewline) {
   if (out == nullptr) {
     return nullptr;
   }
@@ -696,7 +565,7 @@ char* TRI_EscapeControlsCString(char const* in, size_t inLength,
         *qtr++ = '\\';
         *qtr = 'r';
         break;
-      
+
       case '\t':
         *qtr++ = '\\';
         *qtr = 't';
@@ -734,9 +603,8 @@ char* TRI_EscapeControlsCString(char const* in, size_t inLength,
 /// @brief escapes special characters using unicode escapes
 ////////////////////////////////////////////////////////////////////////////////
 
-char* TRI_EscapeUtf8String(char const* in,
-                           size_t inLength, bool escapeSlash, size_t* outLength,
-                           bool compactResult) {
+char* TRI_EscapeUtf8String(char const* in, size_t inLength, bool escapeSlash,
+                           size_t* outLength, bool compactResult) {
   char* buffer = (char*)TRI_Allocate(6 * inLength + 1);
 
   if (buffer == nullptr) {
@@ -887,19 +755,41 @@ char* TRI_EscapeUtf8String(char const* in,
 /// @brief unescapes unicode escape sequences
 ////////////////////////////////////////////////////////////////////////////////
 
-char* TRI_UnescapeUtf8String(char const* in,
-                             size_t inLength, size_t* outLength, bool normalize) {
-  char const* ptr;
-  char const* end;
-  size_t tmpLength = 0;
-
+char* TRI_UnescapeUtf8String(char const* in, size_t inLength, size_t* outLength, bool normalize) {
   char* buffer = static_cast<char*>(TRI_Allocate(inLength + 1));
 
   if (buffer == nullptr) {
     return nullptr;
   }
 
+  *outLength = TRI_UnescapeUtf8StringInPlace(buffer, in, inLength);
+  buffer[*outLength] = '\0';
+
+  if (normalize && *outLength > 0) {
+    size_t tmpLength = 0;
+    char* utf8_nfc = TRI_normalize_utf8_to_NFC(buffer, *outLength, &tmpLength);
+
+    if (utf8_nfc != nullptr) {
+      *outLength = tmpLength;
+      TRI_Free(buffer);
+      buffer = utf8_nfc;
+    }
+    // intentionally falls through
+  }
+
+  return buffer;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+/// @brief unescapes unicode escape sequences into buffer "buffer".
+/// the buffer must be big enough to hold at least inLength bytes of chars
+/// returns the length of the unescaped string
+////////////////////////////////////////////////////////////////////////////////
+
+size_t TRI_UnescapeUtf8StringInPlace(char* buffer, char const* in, size_t inLength) {
   char* qtr = buffer;
+  char const* ptr;
+  char const* end;
 
   for (ptr = in, end = ptr + inLength; ptr < end; ++ptr, ++qtr) {
     if (*ptr == '\\' && ptr + 1 < end) {
@@ -985,54 +875,7 @@ char* TRI_UnescapeUtf8String(char const* in,
     *qtr = *ptr;
   }
 
-  *qtr = '\0';
-  *outLength = (size_t)(qtr - buffer);
-
-  if (normalize && *outLength > 0) {
-    char* utf8_nfc =
-        TRI_normalize_utf8_to_NFC(buffer, *outLength, &tmpLength);
-
-    if (utf8_nfc != nullptr) {
-      *outLength = tmpLength;
-      TRI_Free(buffer);
-      return utf8_nfc;
-    }
-    // intentionally falls through
-  }
-
-  return buffer;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief determine the number of characters in a UTF-8 string
-/// the UTF-8 string must be well-formed and end with a NUL terminator
-////////////////////////////////////////////////////////////////////////////////
-
-size_t TRI_CharLengthUtf8String(char const* in) {
-  unsigned char const* p = reinterpret_cast<unsigned char const*>(in);
-  size_t chars = 0;
-
-  while (*p) {
-    unsigned char c = *p;
-
-    if (c < 128) {
-      // single byte
-      p++;
-    } else if (c < 224) {
-      p += 2;
-    } else if (c < 240) {
-      p += 3;
-    } else if (c < 248) {
-      p += 4;
-    } else {
-      // invalid UTF-8 sequence
-      break;
-    }
-
-    ++chars;
-  }
-
-  return chars;
+  return static_cast<size_t>(qtr - buffer);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

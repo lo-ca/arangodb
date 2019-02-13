@@ -31,11 +31,16 @@ const functionsDocumentation = {
 const optionsDocumentation = [
   '   - `skipCache`: if set to true, the hash cache unittests are skipped',
   '   - `skipCatch`: if set to true the catch unittests are skipped',
-  '   - `skipGeo`: if set to true the geo index tests are skipped'
+  '   - `skipGeo`: obsolete and only here for downwards-compatibility'
 ];
 
 const fs = require('fs');
 const pu = require('@arangodb/process-utils');
+
+const testPaths = {
+  'catch': [],
+  'boost': []
+};
 
 // //////////////////////////////////////////////////////////////////////////////
 // / @brief TEST: Catch
@@ -68,9 +73,11 @@ function catchRunner (options) {
   if (!options.skipCatch) {
     if (run !== '') {
       let argv = [
+        '--log.line-number',
+        options.extremeVerbosity ? "true" : "false",
         '[exclude:longRunning][exclude:cache]'
       ];
-      results.basics = pu.executeAndWait(run, argv, options, 'all-catch', rootDir);
+      results.basics = pu.executeAndWait(run, argv, options, 'all-catch', rootDir, false, options.coreCheck);
       results.basics.failed = results.basics.status ? 0 : 1;
       if (!results.basics.status) {
         results.failed += 1;
@@ -80,21 +87,24 @@ function catchRunner (options) {
       results.basics = {
         failed: 1,
         status: false,
-        message: 'binary "basics_suite" not found'
+        message: 'binary "arangodbtests" not found when trying to run suite "all-catch"'
       };
     }
   }
 
   if (!options.skipCache) {
     if (run !== '') {
-      let argv = ['[cache][exclude:longRunning]',
-                  '-r',
-                  'junit',
-                  '-o',
-                  fs.join(options.testOutputDirectory, 'catch-cache.xml')
-                 ];
+      let argv = [
+        '--log.line-number',
+        options.extremeVerbosity ? "true" : "false",
+        '[cache][exclude:longRunning]',
+        '-r',
+        'junit',
+        '-o',
+        fs.join(options.testOutputDirectory, 'catch-cache.xml')
+      ];
       results.cache_suite = pu.executeAndWait(run, argv, options,
-                                           'cache_suite', rootDir);
+                                              'cache_suite', rootDir, false, options.coreCheck);
       results.cache_suite.failed = results.cache_suite.status ? 0 : 1;
       if (!results.cache_suite.status) {
         results.failed += 1;
@@ -104,30 +114,7 @@ function catchRunner (options) {
       results.cache_suite = {
         failed: 1,
         status: false,
-        message: 'binary "cache_suite" not found'
-      };
-    }
-  }
-
-  if (!options.skipGeo) {
-    if (run !== '') {
-      let argv = ['[geo][exclude:longRunning]',
-                  '-r',
-                  'junit',
-                  '-o',
-                  fs.join(options.testOutputDirectory, 'catch-geo.xml')
-                 ];
-      results.geo_suite = pu.executeAndWait(run, argv, options, 'geo_suite', rootDir);
-      results.geo_suite.failed = results.geo_suite.status ? 0 : 1;
-      if (!results.geo_suite.status) {
-        results.failed += 1;
-      }
-    } else {
-      results.failed += 1;
-      results.geo_suite = {
-        failed: 1,
-        status: false,
-        message: 'binary "geo_suite" not found'
+        message: 'binary "arangodbtests" not found when trying to run suite "cache_suite"'
       };
     }
   }
@@ -135,18 +122,17 @@ function catchRunner (options) {
   return results;
 }
 
-function setup (testFns, defaultFns, opts, fnDocs, optionsDoc) {
+exports.setup = function (testFns, defaultFns, opts, fnDocs, optionsDoc, allTestPaths) {
+  Object.assign(allTestPaths, testPaths);
   testFns['catch'] = catchRunner;
   testFns['boost'] = catchRunner;
 
   opts['skipCatch'] = false;
   opts['skipCache'] = true;
-  opts['skipGeo'] = false;
+  opts['skipGeo'] = false; // not used anymore - only here for downwards-compatibility
 
   defaultFns.push('catch');
 
   for (var attrname in functionsDocumentation) { fnDocs[attrname] = functionsDocumentation[attrname]; }
   for (var i = 0; i < optionsDocumentation.length; i++) { optionsDoc.push(optionsDocumentation[i]); }
-}
-
-exports.setup = setup;
+};

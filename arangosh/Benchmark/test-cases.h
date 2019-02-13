@@ -29,16 +29,13 @@ static bool DeleteCollection(SimpleHttpClient*, std::string const&);
 
 static bool CreateCollection(SimpleHttpClient*, std::string const&, int const);
 
-static bool CreateDocument(SimpleHttpClient*, std::string const&,
-                           std::string const&);
+static bool CreateDocument(SimpleHttpClient*, std::string const&, std::string const&);
 
 static bool CreateIndex(SimpleHttpClient*, std::string const&,
                         std::string const&, std::string const&);
 
 struct VersionTest : public BenchmarkOperation {
   VersionTest() : BenchmarkOperation() { _url = "/_api/version"; }
-
-  ~VersionTest() {}
 
   bool setUp(SimpleHttpClient* client) override { return true; }
 
@@ -54,9 +51,8 @@ struct VersionTest : public BenchmarkOperation {
     return rest::RequestType::GET;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     static char const* payload = "";
 
     *mustFree = false;
@@ -70,8 +66,6 @@ struct VersionTest : public BenchmarkOperation {
 struct DocumentCrudAppendTest : public BenchmarkOperation {
   DocumentCrudAppendTest() : BenchmarkOperation() {}
 
-  ~DocumentCrudAppendTest() {}
-
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
            CreateCollection(client, ARANGOBENCH->collection(), 2);
@@ -84,14 +78,12 @@ struct DocumentCrudAppendTest : public BenchmarkOperation {
     size_t const mod = globalCounter % 4;
 
     if (mod == 0) {
-      return std::string("/_api/document?collection=" +
-                         ARANGOBENCH->collection());
+      return std::string("/_api/document?collection=" + ARANGOBENCH->collection());
     } else {
       size_t keyId = (size_t)(globalCounter / 4);
       std::string const key = "testkey" + StringUtils::itoa(keyId);
 
-      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" +
-                         key);
+      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" + key);
     }
   }
 
@@ -113,9 +105,8 @@ struct DocumentCrudAppendTest : public BenchmarkOperation {
     }
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 4;
 
     if (mod == 0 || mod == 2) {
@@ -154,15 +145,13 @@ struct DocumentCrudAppendTest : public BenchmarkOperation {
       return (char const*)nullptr;
     } else {
       TRI_ASSERT(false);
-      return 0;
+      return nullptr;
     }
   }
 };
 
 struct DocumentCrudWriteReadTest : public BenchmarkOperation {
   DocumentCrudWriteReadTest() : BenchmarkOperation() {}
-
-  ~DocumentCrudWriteReadTest() {}
 
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
@@ -176,14 +165,12 @@ struct DocumentCrudWriteReadTest : public BenchmarkOperation {
     size_t const mod = globalCounter % 2;
 
     if (mod == 0) {
-      return std::string("/_api/document?collection=" +
-                         ARANGOBENCH->collection());
+      return std::string("/_api/document?collection=" + ARANGOBENCH->collection());
     } else {
       size_t keyId = (size_t)(globalCounter / 2);
       std::string const key = "testkey" + StringUtils::itoa(keyId);
 
-      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" +
-                         key);
+      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" + key);
     }
   }
 
@@ -198,9 +185,8 @@ struct DocumentCrudWriteReadTest : public BenchmarkOperation {
     }
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 2;
 
     if (mod == 0) {
@@ -240,8 +226,6 @@ struct DocumentCrudWriteReadTest : public BenchmarkOperation {
 struct ShapesTest : public BenchmarkOperation {
   ShapesTest() : BenchmarkOperation() {}
 
-  ~ShapesTest() {}
-
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
            CreateCollection(client, ARANGOBENCH->collection(), 2);
@@ -254,14 +238,12 @@ struct ShapesTest : public BenchmarkOperation {
     size_t const mod = globalCounter % 3;
 
     if (mod == 0) {
-      return std::string("/_api/document?collection=" +
-                         ARANGOBENCH->collection());
+      return std::string("/_api/document?collection=" + ARANGOBENCH->collection());
     } else {
       size_t keyId = (size_t)(globalCounter / 3);
       std::string const key = "testkey" + StringUtils::itoa(keyId);
 
-      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" +
-                         key);
+      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" + key);
     }
   }
 
@@ -278,9 +260,8 @@ struct ShapesTest : public BenchmarkOperation {
     }
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 3;
 
     if (mod == 0) {
@@ -301,8 +282,7 @@ struct ShapesTest : public BenchmarkOperation {
           mod = 100;
         }
         TRI_AppendStringStringBuffer(buffer, ",\"value");
-        TRI_AppendUInt64StringBuffer(buffer,
-                                     (uint64_t)((globalCounter + i) % mod));
+        TRI_AppendUInt64StringBuffer(buffer, (uint64_t)((globalCounter + i) % mod));
         TRI_AppendStringStringBuffer(
             buffer,
             "\":\"some bogus string value to fill up the datafile...\"");
@@ -327,8 +307,6 @@ struct ShapesTest : public BenchmarkOperation {
 struct ShapesAppendTest : public BenchmarkOperation {
   ShapesAppendTest() : BenchmarkOperation() {}
 
-  ~ShapesAppendTest() {}
-
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
            CreateCollection(client, ARANGOBENCH->collection(), 2);
@@ -341,14 +319,12 @@ struct ShapesAppendTest : public BenchmarkOperation {
     size_t const mod = globalCounter % 2;
 
     if (mod == 0) {
-      return std::string("/_api/document?collection=" +
-                         ARANGOBENCH->collection());
+      return std::string("/_api/document?collection=" + ARANGOBENCH->collection());
     } else {
       size_t keyId = (size_t)(globalCounter / 2);
       std::string const key = "testkey" + StringUtils::itoa(keyId);
 
-      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" +
-                         key);
+      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" + key);
     }
   }
 
@@ -362,9 +338,8 @@ struct ShapesAppendTest : public BenchmarkOperation {
     return rest::RequestType::GET;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 2;
 
     if (mod == 0) {
@@ -385,8 +360,7 @@ struct ShapesAppendTest : public BenchmarkOperation {
           mod = 100;
         }
         TRI_AppendStringStringBuffer(buffer, ",\"value");
-        TRI_AppendUInt64StringBuffer(buffer,
-                                     (uint64_t)((globalCounter + i) % mod));
+        TRI_AppendUInt64StringBuffer(buffer, (uint64_t)((globalCounter + i) % mod));
         TRI_AppendStringStringBuffer(
             buffer,
             "\":\"some bogus string value to fill up the datafile...\"");
@@ -413,8 +387,6 @@ struct RandomShapesTest : public BenchmarkOperation {
     _randomValue = RandomGenerator::interval(UINT32_MAX);
   }
 
-  ~RandomShapesTest() {}
-
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
            CreateCollection(client, ARANGOBENCH->collection(), 2);
@@ -427,8 +399,7 @@ struct RandomShapesTest : public BenchmarkOperation {
     size_t const mod = globalCounter % 3;
 
     if (mod == 0) {
-      return std::string("/_api/document?collection=") +
-             ARANGOBENCH->collection();
+      return std::string("/_api/document?collection=") + ARANGOBENCH->collection();
     } else {
       size_t keyId = (size_t)(globalCounter / 3);
       std::string const key = "testkey" + StringUtils::itoa(keyId);
@@ -451,9 +422,8 @@ struct RandomShapesTest : public BenchmarkOperation {
     }
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 3;
 
     if (mod == 0) {
@@ -468,8 +438,7 @@ struct RandomShapesTest : public BenchmarkOperation {
       TRI_AppendString2StringBuffer(buffer, key.c_str(), key.size());
       TRI_AppendStringStringBuffer(buffer, "\"");
 
-      uint32_t const t =
-          _randomValue % (uint32_t)(globalCounter + threadNumber + 1);
+      uint32_t const t = _randomValue % (uint32_t)(globalCounter + threadNumber + 1);
 
       for (uint64_t i = 1; i <= n; ++i) {
         TRI_AppendStringStringBuffer(buffer, ",\"value");
@@ -505,8 +474,6 @@ struct RandomShapesTest : public BenchmarkOperation {
 struct DocumentCrudTest : public BenchmarkOperation {
   DocumentCrudTest() : BenchmarkOperation() {}
 
-  ~DocumentCrudTest() {}
-
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
            CreateCollection(client, ARANGOBENCH->collection(), 2);
@@ -519,14 +486,12 @@ struct DocumentCrudTest : public BenchmarkOperation {
     size_t const mod = globalCounter % 5;
 
     if (mod == 0) {
-      return std::string("/_api/document?collection=" +
-                         ARANGOBENCH->collection());
+      return std::string("/_api/document?collection=" + ARANGOBENCH->collection());
     } else {
       size_t keyId = (size_t)(globalCounter / 5);
       std::string const key = "testkey" + StringUtils::itoa(keyId);
 
-      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" +
-                         key);
+      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" + key);
     }
   }
 
@@ -550,9 +515,8 @@ struct DocumentCrudTest : public BenchmarkOperation {
     }
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 5;
 
     if (mod == 0 || mod == 2) {
@@ -591,15 +555,13 @@ struct DocumentCrudTest : public BenchmarkOperation {
       return (char const*)nullptr;
     } else {
       TRI_ASSERT(false);
-      return 0;
+      return nullptr;
     }
   }
 };
 
 struct EdgeCrudTest : public BenchmarkOperation {
   EdgeCrudTest() : BenchmarkOperation() {}
-
-  ~EdgeCrudTest() {}
 
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
@@ -613,14 +575,12 @@ struct EdgeCrudTest : public BenchmarkOperation {
     size_t const mod = globalCounter % 4;
 
     if (mod == 0) {
-      return std::string("/_api/document?collection=" +
-                         ARANGOBENCH->collection());
+      return std::string("/_api/document?collection=" + ARANGOBENCH->collection());
     } else {
       size_t keyId = (size_t)(globalCounter / 4);
       std::string const key = "testkey" + StringUtils::itoa(keyId);
 
-      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" +
-                         key);
+      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" + key);
     }
   }
 
@@ -648,9 +608,8 @@ struct EdgeCrudTest : public BenchmarkOperation {
     }
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 4;
 
     if (mod == 0 || mod == 2) {
@@ -702,15 +661,13 @@ struct EdgeCrudTest : public BenchmarkOperation {
       return (char const*)nullptr;
     } else {
       TRI_ASSERT(false);
-      return 0;
+      return nullptr;
     }
   }
 };
 
 struct SkiplistTest : public BenchmarkOperation {
   SkiplistTest() : BenchmarkOperation() {}
-
-  ~SkiplistTest() {}
 
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
@@ -726,14 +683,12 @@ struct SkiplistTest : public BenchmarkOperation {
     size_t const mod = globalCounter % 4;
 
     if (mod == 0) {
-      return std::string("/_api/document?collection=" +
-                         ARANGOBENCH->collection());
+      return std::string("/_api/document?collection=" + ARANGOBENCH->collection());
     } else {
       size_t keyId = (size_t)(globalCounter / 4);
       std::string const key = "testkey" + StringUtils::itoa(keyId);
 
-      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" +
-                         key);
+      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" + key);
     }
   }
 
@@ -755,9 +710,8 @@ struct SkiplistTest : public BenchmarkOperation {
     }
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 4;
 
     if (mod == 0 || mod == 2) {
@@ -787,7 +741,7 @@ struct SkiplistTest : public BenchmarkOperation {
       return (char const*)nullptr;
     } else {
       TRI_ASSERT(false);
-      return 0;
+      return nullptr;
     }
   }
 };
@@ -795,13 +749,10 @@ struct SkiplistTest : public BenchmarkOperation {
 struct HashTest : public BenchmarkOperation {
   HashTest() : BenchmarkOperation() {}
 
-  ~HashTest() {}
-
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
            CreateCollection(client, ARANGOBENCH->collection(), 2) &&
-           CreateIndex(client, ARANGOBENCH->collection(), "hash",
-                       "[\"value\"]");
+           CreateIndex(client, ARANGOBENCH->collection(), "hash", "[\"value\"]");
   }
 
   void tearDown() override {}
@@ -811,14 +762,12 @@ struct HashTest : public BenchmarkOperation {
     size_t const mod = globalCounter % 4;
 
     if (mod == 0) {
-      return std::string("/_api/document?collection=" +
-                         ARANGOBENCH->collection());
+      return std::string("/_api/document?collection=" + ARANGOBENCH->collection());
     } else {
       size_t keyId = (size_t)(globalCounter / 4);
       std::string const key = "testkey" + StringUtils::itoa(keyId);
 
-      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" +
-                         key);
+      return std::string("/_api/document/" + ARANGOBENCH->collection() + "/" + key);
     }
   }
 
@@ -840,9 +789,8 @@ struct HashTest : public BenchmarkOperation {
     }
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 4;
 
     if (mod == 0 || mod == 2) {
@@ -872,13 +820,13 @@ struct HashTest : public BenchmarkOperation {
       return (char const*)nullptr;
     } else {
       TRI_ASSERT(false);
-      return 0;
+      return nullptr;
     }
   }
 };
 
 struct DocumentImportTest : public BenchmarkOperation {
-  DocumentImportTest() : BenchmarkOperation(), _url(), _buffer(0) {
+  DocumentImportTest() : BenchmarkOperation(), _url(), _buffer(nullptr) {
     _url = "/_api/import?collection=" + ARANGOBENCH->collection() +
            "&type=documents";
 
@@ -915,9 +863,8 @@ struct DocumentImportTest : public BenchmarkOperation {
     return rest::RequestType::POST;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     *mustFree = false;
     *length = _length;
     return (char const*)_buffer->_buffer;
@@ -931,7 +878,7 @@ struct DocumentImportTest : public BenchmarkOperation {
 };
 
 struct DocumentCreationTest : public BenchmarkOperation {
-  DocumentCreationTest() : BenchmarkOperation(), _url(), _buffer(0) {
+  DocumentCreationTest() : BenchmarkOperation(), _url(), _buffer(nullptr) {
     _url = "/_api/document?collection=" + ARANGOBENCH->collection();
 
     uint64_t const n = ARANGOBENCH->complexity();
@@ -953,9 +900,7 @@ struct DocumentCreationTest : public BenchmarkOperation {
     _length = TRI_LengthStringBuffer(_buffer);
   }
 
-  ~DocumentCreationTest() {
-    TRI_FreeStringBuffer(_buffer);
-  }
+  ~DocumentCreationTest() { TRI_FreeStringBuffer(_buffer); }
 
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
@@ -974,9 +919,8 @@ struct DocumentCreationTest : public BenchmarkOperation {
     return rest::RequestType::POST;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     *mustFree = false;
     *length = _length;
     return (char const*)_buffer->_buffer;
@@ -994,8 +938,6 @@ struct CollectionCreationTest : public BenchmarkOperation {
     _url = "/_api/collection";
   }
 
-  ~CollectionCreationTest() {}
-
   bool setUp(SimpleHttpClient* client) override { return true; }
 
   void tearDown() override {}
@@ -1010,15 +952,14 @@ struct CollectionCreationTest : public BenchmarkOperation {
     return rest::RequestType::POST;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     TRI_string_buffer_t* buffer;
     char* data;
 
     buffer = TRI_CreateSizedStringBuffer(64);
-    if (buffer == 0) {
-      return 0;
+    if (buffer == nullptr) {
+      return nullptr;
     }
     TRI_AppendStringStringBuffer(buffer, "{\"name\":\"");
     TRI_AppendStringStringBuffer(buffer, ARANGOBENCH->collection().c_str());
@@ -1045,8 +986,6 @@ std::atomic<uint64_t> CollectionCreationTest::_counter(0);
 struct TransactionAqlTest : public BenchmarkOperation {
   TransactionAqlTest() : BenchmarkOperation() {}
 
-  ~TransactionAqlTest() {}
-
   bool setUp(SimpleHttpClient* client) override {
     _c1 = std::string(ARANGOBENCH->collection() + "1");
     _c2 = std::string(ARANGOBENCH->collection() + "2");
@@ -1069,9 +1008,8 @@ struct TransactionAqlTest : public BenchmarkOperation {
     return rest::RequestType::POST;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 8;
     TRI_string_buffer_t* buffer;
     buffer = TRI_CreateSizedStringBuffer(256);
@@ -1138,8 +1076,6 @@ struct TransactionAqlTest : public BenchmarkOperation {
 struct TransactionCountTest : public BenchmarkOperation {
   TransactionCountTest() : BenchmarkOperation() {}
 
-  ~TransactionCountTest() {}
-
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
            CreateCollection(client, ARANGOBENCH->collection(), 2);
@@ -1157,9 +1093,8 @@ struct TransactionCountTest : public BenchmarkOperation {
     return rest::RequestType::POST;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     TRI_string_buffer_t* buffer;
     buffer = TRI_CreateSizedStringBuffer(256);
 
@@ -1169,11 +1104,12 @@ struct TransactionCountTest : public BenchmarkOperation {
                                  "\" }, \"action\": \"function () { var c = "
                                  "require(\\\"internal\\\").db[\\\"");
     TRI_AppendStringStringBuffer(buffer, ARANGOBENCH->collection().c_str());
-    TRI_AppendStringStringBuffer(buffer,
-                                 "\\\"]; var startcount = c.count(); for (var "
-                                 "i = 0; i < 50; ++i) { if (startcount + i !== "
-                                 "c.count()) { throw \\\"error, counters deviate!\\\"; } c.save({ "
-                                 "}); } }\" }");
+    TRI_AppendStringStringBuffer(
+        buffer,
+        "\\\"]; var startcount = c.count(); for (var "
+        "i = 0; i < 50; ++i) { if (startcount + i !== "
+        "c.count()) { throw \\\"error, counters deviate!\\\"; } c.save({ "
+        "}); } }\" }");
 
     *length = TRI_LengthStringBuffer(buffer);
     *mustFree = true;
@@ -1187,15 +1123,12 @@ struct TransactionCountTest : public BenchmarkOperation {
 struct TransactionDeadlockTest : public BenchmarkOperation {
   TransactionDeadlockTest() : BenchmarkOperation() {}
 
-  ~TransactionDeadlockTest() {}
-
   bool setUp(SimpleHttpClient* client) override {
     _c1 = std::string(ARANGOBENCH->collection() + "1");
     _c2 = std::string(ARANGOBENCH->collection() + "2");
 
     return DeleteCollection(client, _c1) && DeleteCollection(client, _c2) &&
-           CreateCollection(client, _c1, 2) &&
-           CreateCollection(client, _c2, 2) &&
+           CreateCollection(client, _c1, 2) && CreateCollection(client, _c2, 2) &&
            CreateDocument(client, _c2, "{ \"_key\": \"sum\", \"count\": 0 }");
   }
 
@@ -1211,9 +1144,8 @@ struct TransactionDeadlockTest : public BenchmarkOperation {
     return rest::RequestType::POST;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 2;
     TRI_string_buffer_t* buffer;
     buffer = TRI_CreateSizedStringBuffer(256);
@@ -1255,15 +1187,12 @@ struct TransactionDeadlockTest : public BenchmarkOperation {
 struct TransactionMultiTest : public BenchmarkOperation {
   TransactionMultiTest() : BenchmarkOperation() {}
 
-  ~TransactionMultiTest() {}
-
   bool setUp(SimpleHttpClient* client) override {
     _c1 = std::string(ARANGOBENCH->collection() + "1");
     _c2 = std::string(ARANGOBENCH->collection() + "2");
 
     return DeleteCollection(client, _c1) && DeleteCollection(client, _c2) &&
-           CreateCollection(client, _c1, 2) &&
-           CreateCollection(client, _c2, 2) &&
+           CreateCollection(client, _c1, 2) && CreateCollection(client, _c2, 2) &&
            CreateDocument(client, _c2, "{ \"_key\": \"sum\", \"count\": 0 }");
   }
 
@@ -1279,9 +1208,8 @@ struct TransactionMultiTest : public BenchmarkOperation {
     return rest::RequestType::POST;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     size_t const mod = globalCounter % 2;
     TRI_string_buffer_t* buffer;
     buffer = TRI_CreateSizedStringBuffer(256);
@@ -1314,11 +1242,12 @@ struct TransactionMultiTest : public BenchmarkOperation {
                                    "c2.document(\\\"sum\\\"); c2.update(d, { "
                                    "count: d.count + n });");
     } else {
-      TRI_AppendStringStringBuffer(buffer,
-                                   "var r1 = 0; c1.toArray().forEach(function "
-                                   "(d) { r1 += d.count }); var r2 = "
-                                   "c2.document(\\\"sum\\\").count; if (r1 !== "
-                                   "r2) { throw \\\"error, counters deviate!\\\"; }");
+      TRI_AppendStringStringBuffer(
+          buffer,
+          "var r1 = 0; c1.toArray().forEach(function "
+          "(d) { r1 += d.count }); var r2 = "
+          "c2.document(\\\"sum\\\").count; if (r1 !== "
+          "r2) { throw \\\"error, counters deviate!\\\"; }");
     }
 
     TRI_AppendStringStringBuffer(buffer, " }\" }");
@@ -1337,8 +1266,6 @@ struct TransactionMultiTest : public BenchmarkOperation {
 
 struct TransactionMultiCollectionTest : public BenchmarkOperation {
   TransactionMultiCollectionTest() : BenchmarkOperation() {}
-
-  ~TransactionMultiCollectionTest() {}
 
   bool setUp(SimpleHttpClient* client) override {
     _c1 = std::string(ARANGOBENCH->collection() + "1");
@@ -1360,9 +1287,8 @@ struct TransactionMultiCollectionTest : public BenchmarkOperation {
     return rest::RequestType::POST;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     TRI_string_buffer_t* buffer;
     buffer = TRI_CreateSizedStringBuffer(256);
 
@@ -1410,10 +1336,8 @@ struct TransactionMultiCollectionTest : public BenchmarkOperation {
   std::string _c2;
 };
 
-struct AqlInsertTest : public BenchmarkOperation {
-  AqlInsertTest() : BenchmarkOperation() {}
-
-  ~AqlInsertTest() {}
+struct StreamCursorTest : public BenchmarkOperation {
+  StreamCursorTest() : BenchmarkOperation() {}
 
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
@@ -1432,9 +1356,82 @@ struct AqlInsertTest : public BenchmarkOperation {
     return rest::RequestType::POST;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
+    TRI_string_buffer_t* buffer;
+    buffer = TRI_CreateSizedStringBuffer(256);
+
+    size_t const mod = globalCounter % 2;
+
+    if (globalCounter == 0) {
+      TRI_AppendStringStringBuffer(
+          buffer, "{\"query\":\"FOR i IN 1..500 INSERT { _key: TO_STRING(i)");
+
+      uint64_t const n = ARANGOBENCH->complexity();
+      for (uint64_t i = 1; i <= n; ++i) {
+        TRI_AppendStringStringBuffer(buffer, ",\\\"value");
+        TRI_AppendUInt64StringBuffer(buffer, i);
+        TRI_AppendStringStringBuffer(buffer, "\\\":true");
+      }
+
+      TRI_AppendStringStringBuffer(buffer, " } INTO ");
+      TRI_AppendStringStringBuffer(buffer, ARANGOBENCH->collection().c_str());
+      TRI_AppendStringStringBuffer(buffer,
+                                   "\"}");  // OPTIONS { ignoreErrors: true }");
+    } else if (mod == 0) {
+      TRI_AppendStringStringBuffer(
+          buffer,
+          "{\"query\":\"UPDATE { _key: \\\"1\\\" } WITH { \\\"foo\\\":1");
+
+      uint64_t const n = ARANGOBENCH->complexity();
+      for (uint64_t i = 1; i <= n; ++i) {
+        TRI_AppendStringStringBuffer(buffer, ",\\\"value");
+        TRI_AppendUInt64StringBuffer(buffer, i);
+        TRI_AppendStringStringBuffer(buffer, "\\\":true");
+      }
+
+      TRI_AppendStringStringBuffer(buffer, " } INTO ");
+      TRI_AppendStringStringBuffer(buffer, ARANGOBENCH->collection().c_str());
+      TRI_AppendStringStringBuffer(buffer,
+                                   " OPTIONS { ignoreErrors: true }\"}");
+    } else {
+      TRI_AppendStringStringBuffer(buffer, "{\"query\":\"FOR doc IN ");
+      TRI_AppendStringStringBuffer(buffer, ARANGOBENCH->collection().c_str());
+      TRI_AppendStringStringBuffer(
+          buffer, " RETURN doc\",\"options\":{\"stream\":true}}");
+    }
+
+    *length = TRI_LengthStringBuffer(buffer);
+    *mustFree = true;
+    char* ptr = TRI_StealStringBuffer(buffer);
+    TRI_FreeStringBuffer(buffer);
+
+    return (char const*)ptr;
+  }
+};
+
+struct AqlInsertTest : public BenchmarkOperation {
+  AqlInsertTest() : BenchmarkOperation() {}
+
+  bool setUp(SimpleHttpClient* client) override {
+    return DeleteCollection(client, ARANGOBENCH->collection()) &&
+           CreateCollection(client, ARANGOBENCH->collection(), 2);
+  }
+
+  void tearDown() override {}
+
+  std::string url(int const threadNumber, size_t const threadCounter,
+                  size_t const globalCounter) override {
+    return std::string("/_api/cursor");
+  }
+
+  rest::RequestType type(int const threadNumber, size_t const threadCounter,
+                         size_t const globalCounter) override {
+    return rest::RequestType::POST;
+  }
+
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     TRI_string_buffer_t* buffer;
     buffer = TRI_CreateSizedStringBuffer(256);
 
@@ -1466,8 +1463,6 @@ struct AqlInsertTest : public BenchmarkOperation {
 struct AqlV8Test : public BenchmarkOperation {
   AqlV8Test() : BenchmarkOperation() {}
 
-  ~AqlV8Test() {}
-
   bool setUp(SimpleHttpClient* client) override {
     return DeleteCollection(client, ARANGOBENCH->collection()) &&
            CreateCollection(client, ARANGOBENCH->collection(), 2);
@@ -1485,9 +1480,8 @@ struct AqlV8Test : public BenchmarkOperation {
     return rest::RequestType::POST;
   }
 
-  char const* payload(size_t* length, int const threadNumber,
-                      size_t const threadCounter, size_t const globalCounter,
-                      bool* mustFree) override {
+  char const* payload(size_t* length, int const threadNumber, size_t const threadCounter,
+                      size_t const globalCounter, bool* mustFree) override {
     TRI_string_buffer_t* buffer;
     buffer = TRI_CreateSizedStringBuffer(256);
 
@@ -1522,8 +1516,7 @@ struct AqlV8Test : public BenchmarkOperation {
 /// @brief delete a collection
 ////////////////////////////////////////////////////////////////////////////////
 
-static bool DeleteCollection(SimpleHttpClient* client,
-                             std::string const& name) {
+static bool DeleteCollection(SimpleHttpClient* client, std::string const& name) {
   std::unordered_map<std::string, std::string> headerFields;
   SimpleHttpResult* result = nullptr;
 
@@ -1533,8 +1526,7 @@ static bool DeleteCollection(SimpleHttpClient* client,
   bool failed = true;
   if (result != nullptr) {
     int statusCode = result->getHttpReturnCode();
-    if (statusCode == 200 || statusCode == 201 || statusCode == 202 ||
-        statusCode == 404) {
+    if (statusCode == 200 || statusCode == 201 || statusCode == 202 || statusCode == 404) {
       failed = false;
     }
 
@@ -1553,13 +1545,12 @@ static bool CreateCollection(SimpleHttpClient* client, std::string const& name,
   std::unordered_map<std::string, std::string> headerFields;
   SimpleHttpResult* result = nullptr;
 
-  std::string payload = "{\"name\":\"" + name + "\",\"type\":" +
-                        StringUtils::itoa(type) + ",\"replicationFactor\":" +
-                        StringUtils::itoa(ARANGOBENCH->replicationFactor()) +
-                        ",\"numberOfShards\":" +
-                        StringUtils::itoa(ARANGOBENCH->numberOfShards()) +
-                        ",\"waitForSync\":" +
-                        (ARANGOBENCH->waitForSync() ? "true" : "false") + "}";
+  std::string payload =
+      "{\"name\":\"" + name + "\",\"type\":" + StringUtils::itoa(type) +
+      ",\"replicationFactor\":" + StringUtils::itoa(ARANGOBENCH->replicationFactor()) +
+      ",\"numberOfShards\":" + StringUtils::itoa(ARANGOBENCH->numberOfShards()) +
+      ",\"waitForSync\":" + (ARANGOBENCH->waitForSync() ? "true" : "false") +
+      "}";
 
   result = client->request(rest::RequestType::POST, "/_api/collection",
                            payload.c_str(), payload.size(), headerFields);
@@ -1589,15 +1580,13 @@ static bool CreateIndex(SimpleHttpClient* client, std::string const& name,
 
   std::string payload =
       "{\"type\":\"" + type + "\",\"fields\":" + fields + ",\"unique\":false}";
-  result =
-      client->request(rest::RequestType::POST, "/_api/index?collection=" + name,
-                      payload.c_str(), payload.size(), headerFields);
+  result = client->request(rest::RequestType::POST, "/_api/index?collection=" + name,
+                           payload.c_str(), payload.size(), headerFields);
 
   bool failed = true;
 
   if (result != nullptr) {
-    if (result->getHttpReturnCode() == 200 ||
-        result->getHttpReturnCode() == 201) {
+    if (result->getHttpReturnCode() == 200 || result->getHttpReturnCode() == 201) {
       failed = false;
     }
 
@@ -1611,8 +1600,7 @@ static bool CreateIndex(SimpleHttpClient* client, std::string const& name,
 /// @brief create a document
 ////////////////////////////////////////////////////////////////////////////////
 
-static bool CreateDocument(SimpleHttpClient* client,
-                           std::string const& collection,
+static bool CreateDocument(SimpleHttpClient* client, std::string const& collection,
                            std::string const& payload) {
   std::unordered_map<std::string, std::string> headerFields;
   SimpleHttpResult* result = nullptr;
@@ -1624,8 +1612,7 @@ static bool CreateDocument(SimpleHttpClient* client,
   bool failed = true;
 
   if (result != nullptr) {
-    if (result->getHttpReturnCode() == 200 ||
-        result->getHttpReturnCode() == 201 ||
+    if (result->getHttpReturnCode() == 200 || result->getHttpReturnCode() == 201 ||
         result->getHttpReturnCode() == 202) {
       failed = false;
     }
@@ -1700,6 +1687,9 @@ static BenchmarkOperation* GetTestCase(std::string const& name) {
   }
   if (name == "aqlv8") {
     return new AqlV8Test();
+  }
+  if (name == "stream-cursor") {
+    return new StreamCursorTest();
   }
 
   return nullptr;

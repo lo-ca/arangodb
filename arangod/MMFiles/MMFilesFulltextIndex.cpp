@@ -24,10 +24,10 @@
 #include "MMFilesFulltextIndex.h"
 #include "Aql/Ast.h"
 #include "Aql/AstNode.h"
+#include "Basics/StaticStrings.h"
 #include "Basics/StringRef.h"
 #include "Basics/Utf8Helper.h"
 #include "Basics/VelocyPackHelper.h"
-#include "Indexes/IndexResult.h"
 #include "Logger/Logger.h"
 #include "MMFiles/mmfiles-fulltext-index.h"
 #include "MMFiles/mmfiles-fulltext-query.h"
@@ -44,11 +44,10 @@ void MMFilesFulltextIndex::extractWords(std::set<std::string>& words,
                                         VPackSlice value, int level) const {
   if (value.isString()) {
     // extract the string value for the indexed attribute
-    std::string text = value.copyString();
-
     // parse the document text
-    arangodb::basics::Utf8Helper::DefaultUtf8Helper.tokenize(
-        words, text, _minWordLength, TRI_FULLTEXT_MAX_WORD_LENGTH, true);
+    arangodb::basics::Utf8Helper::DefaultUtf8Helper.tokenize(words, value.stringRef(),
+                                                             _minWordLength, TRI_FULLTEXT_MAX_WORD_LENGTH,
+                                                             true);
     // We don't care for the result. If the result is false, words stays
     // unchanged and is not indexed
   } else if (value.isArray() && level == 0) {
@@ -62,9 +61,9 @@ void MMFilesFulltextIndex::extractWords(std::set<std::string>& words,
   }
 }
 
-MMFilesFulltextIndex::MMFilesFulltextIndex(
-    TRI_idx_iid_t iid, arangodb::LogicalCollection* collection,
-    VPackSlice const& info)
+MMFilesFulltextIndex::MMFilesFulltextIndex(TRI_idx_iid_t iid,
+                                           arangodb::LogicalCollection& collection,
+                                           arangodb::velocypack::Slice const& info)
     : MMFilesIndex(iid, collection, info),
       _fulltextIndex(nullptr),
       _minWordLength(TRI_FULLTEXT_MIN_WORD_LENGTH_DEFAULT) {
@@ -106,7 +105,7 @@ MMFilesFulltextIndex::MMFilesFulltextIndex(
 
 MMFilesFulltextIndex::~MMFilesFulltextIndex() {
   if (_fulltextIndex != nullptr) {
-    LOG_TOPIC(TRACE, arangodb::Logger::FIXME) << "destroying fulltext index";
+    LOG_TOPIC(TRACE, arangodb::Logger::ENGINES) << "destroying fulltext index";
     TRI_FreeFtsIndex(_fulltextIndex);
   }
 }
@@ -116,12 +115,12 @@ size_t MMFilesFulltextIndex::memory() const {
 }
 
 /// @brief return a VelocyPack representation of the index
-void MMFilesFulltextIndex::toVelocyPack(VPackBuilder& builder, bool withFigures,
-                                        bool forPersistence) const {
+void MMFilesFulltextIndex::toVelocyPack(VPackBuilder& builder,
+                                        std::underlying_type<Index::Serialize>::type flags) const {
   builder.openObject();
-  Index::toVelocyPack(builder, withFigures, forPersistence);
-  builder.add("unique", VPackValue(false));
-  builder.add("sparse", VPackValue(true));
+  Index::toVelocyPack(builder, flags);
+  builder.add(arangodb::StaticStrings::IndexUnique, arangodb::velocypack::Value(false));
+  builder.add(arangodb::StaticStrings::IndexSparse, arangodb::velocypack::Value(true));
   builder.add("minLength", VPackValue(_minWordLength));
   builder.close();
 }
@@ -130,12 +129,13 @@ void MMFilesFulltextIndex::toVelocyPack(VPackBuilder& builder, bool withFigures,
 bool MMFilesFulltextIndex::matchesDefinition(VPackSlice const& info) const {
   TRI_ASSERT(info.isObject());
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
-  VPackSlice typeSlice = info.get("type");
+  auto typeSlice = info.get(arangodb::StaticStrings::IndexType);
   TRI_ASSERT(typeSlice.isString());
   StringRef typeStr(typeSlice);
   TRI_ASSERT(typeStr == oldtypeName());
 #endif
-  auto value = info.get("id");
+  auto value = info.get(arangodb::StaticStrings::IndexId);
+
   if (!value.isNone()) {
     // We already have an id.
     if (!value.isString()) {
@@ -164,7 +164,8 @@ bool MMFilesFulltextIndex::matchesDefinition(VPackSlice const& info) const {
     return false;
   }
 
-  value = info.get("fields");
+  value = info.get(arangodb::StaticStrings::IndexFields);
+
   if (!value.isArray()) {
     return false;
   }
@@ -174,11 +175,11 @@ bool MMFilesFulltextIndex::matchesDefinition(VPackSlice const& info) const {
     return false;
   }
   if (_unique != arangodb::basics::VelocyPackHelper::getBooleanValue(
-                     info, "unique", false)) {
+                     info, arangodb::StaticStrings::IndexUnique, false)) {
     return false;
   }
   if (_sparse != arangodb::basics::VelocyPackHelper::getBooleanValue(
-                     info, "sparse", true)) {
+                     info, arangodb::StaticStrings::IndexSparse, true)) {
     return false;
   }
 
@@ -193,38 +194,44 @@ bool MMFilesFulltextIndex::matchesDefinition(VPackSlice const& info) const {
     }
     arangodb::StringRef in(f);
     TRI_ParseAttributeString(in, translate, true);
-    if (!arangodb::basics::AttributeName::isIdentical(_fields[i], translate,
-                                                      false)) {
+    if (!arangodb::basics::AttributeName::isIdentical(_fields[i], translate, false)) {
       return false;
     }
   }
   return true;
 }
 
-Result MMFilesFulltextIndex::insert(transaction::Methods*,
+Result MMFilesFulltextIndex::insert(transaction::Methods& trx,
                                     LocalDocumentId const& documentId,
-                                    VPackSlice const& doc, OperationMode mode) {
-  int res = TRI_ERROR_NO_ERROR;
+                                    velocypack::Slice const& doc,
+                                    Index::OperationMode mode) {
+  Result res;
+  int r = TRI_ERROR_NO_ERROR;
   std::set<std::string> words = wordlist(doc);
-
   if (!words.empty()) {
-    res =
-        TRI_InsertWordsMMFilesFulltextIndex(_fulltextIndex, documentId, words);
+    r = TRI_InsertWordsMMFilesFulltextIndex(_fulltextIndex, documentId, words);
   }
-  return IndexResult(res, this);
+  if (r != TRI_ERROR_NO_ERROR) {
+    addErrorMsg(res, r);
+  }
+  return res;
 }
 
-Result MMFilesFulltextIndex::remove(transaction::Methods*,
+Result MMFilesFulltextIndex::remove(transaction::Methods& trx,
                                     LocalDocumentId const& documentId,
-                                    VPackSlice const& doc, OperationMode mode) {
-  int res = TRI_ERROR_NO_ERROR;
+                                    velocypack::Slice const& doc,
+                                    Index::OperationMode mode) {
+  Result res;
+  int r = TRI_ERROR_NO_ERROR;
   std::set<std::string> words = wordlist(doc);
 
   if (!words.empty()) {
-    res =
-        TRI_RemoveWordsMMFilesFulltextIndex(_fulltextIndex, documentId, words);
+    r = TRI_RemoveWordsMMFilesFulltextIndex(_fulltextIndex, documentId, words);
   }
-  return IndexResult(res, this);
+  if (r != TRI_ERROR_NO_ERROR) {
+    addErrorMsg(res, r);
+  }
+  return res;
 }
 
 void MMFilesFulltextIndex::unload() {
@@ -232,10 +239,10 @@ void MMFilesFulltextIndex::unload() {
 }
 
 IndexIterator* MMFilesFulltextIndex::iteratorForCondition(
-    transaction::Methods* trx, ManagedDocumentResult* mdr,
-    aql::AstNode const* condNode, aql::Variable const* var, bool reverse) {
+    transaction::Methods* trx, ManagedDocumentResult*, aql::AstNode const* condNode,
+    aql::Variable const* var, IndexIteratorOptions const& opts) {
+  TRI_ASSERT(!isSorted() || opts.sorted);
   TRI_ASSERT(condNode != nullptr);
-
   TRI_ASSERT(condNode->numMembers() == 1);  // should only be an FCALL
   aql::AstNode const* fcall = condNode->getMember(0);
   TRI_ASSERT(fcall->type == arangodb::aql::NODE_TYPE_FCALL);
@@ -265,10 +272,9 @@ IndexIterator* MMFilesFulltextIndex::iteratorForCondition(
   }
 
   // note: the following call will free "ft"!
-  std::set<TRI_voc_rid_t> results =
-      TRI_QueryMMFilesFulltextIndex(_fulltextIndex, ft);
-  return new MMFilesFulltextIndexIterator(_collection, trx, mdr, this,
-                                          std::move(results));
+  std::set<TRI_voc_rid_t> results = TRI_QueryMMFilesFulltextIndex(_fulltextIndex, ft);
+
+  return new MMFilesFulltextIndexIterator(&_collection, trx, std::move(results));
 }
 
 /// @brief callback function called by the fulltext index to determine the

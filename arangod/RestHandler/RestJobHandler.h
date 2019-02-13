@@ -32,7 +32,7 @@ namespace arangodb {
 namespace rest {
 class AsyncJobManager;
 class Dispatcher;
-}
+}  // namespace rest
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief job control request handler
@@ -44,13 +44,7 @@ class RestJobHandler : public RestBaseHandler {
 
  public:
   char const* name() const override final { return "RestJobHandler"; }
-
-  bool isDirect() const override;
-
-  //////////////////////////////////////////////////////////////////////////////
-  /// @brief executes the handler
-  //////////////////////////////////////////////////////////////////////////////
-
+  RequestLane lane() const override final { return RequestLane::CLIENT_FAST; }
   RestStatus execute() override;
 
   //////////////////////////////////////////////////////////////////////////////
@@ -89,6 +83,9 @@ class RestJobHandler : public RestBaseHandler {
 
   void deleteJob();
 
+ protected:
+  virtual uint32_t forwardingTarget() override;
+
  private:
   //////////////////////////////////////////////////////////////////////////////
   /// @brief async job manager
@@ -96,6 +93,6 @@ class RestJobHandler : public RestBaseHandler {
 
   rest::AsyncJobManager* _jobManager;
 };
-}
+}  // namespace arangodb
 
 #endif

@@ -1,5 +1,5 @@
 Index basics
-------------
+============
 
 Indexes allow fast access to documents, provided the indexed attribute(s)
 are used in a query. While ArangoDB automatically indexes some system
@@ -8,8 +8,11 @@ of documents.
 
 User-defined indexes can be created on collection level. Most user-defined indexes 
 can be created by specifying the names of the index attributes.
-Some index types allow indexing just one attribute (e.g. fulltext index) whereas 
+Some index types allow indexing just one attribute (e.g. *fulltext* index) whereas 
 other index types allow indexing multiple attributes at the same time.
+
+Learn how to use different indexes efficiently by going through the
+[ArangoDB Performance Course](https://www.arangodb.com/arangodb-performance-course/).
 
 The system attributes `_id`, `_key`, `_from` and `_to` are automatically indexed
 by ArangoDB, without the user being required to create extra indexes for them.
@@ -19,9 +22,19 @@ are covered by an edge collection's edge index automatically.
 Using the system attribute `_id` in user-defined indexes is not possible, but 
 indexing `_key`, `_rev`, `_from`, and `_to` is.
 
+Creating new indexes is by default done under an exclusive collection lock. The collection is not
+available while the index is being created.  This "foreground" index creation can be undesirable, 
+if you have to perform it on a live system without a dedicated maintenance window.
+
+For potentially long running index  creation operations the _rocksdb_ storage-engine also supports 
+creating indexes in "background". The collection remains (mostly) available during the index creation, 
+see the section [Creating Indexes in Background](#creating-indexes-in-background) for more information.
+
+
 ArangoDB provides the following index types:
 
-### Primary Index
+Primary Index
+-------------
 
 For each collection there will always be a *primary index* which is a hash index 
 for the [document keys](../Appendix/Glossary.md#document-key) (`_key` attribute)
@@ -45,7 +58,8 @@ The primary index of a collection cannot be dropped or changed, and there is no
 mechanism to create user-defined primary indexes.
 
 
-### Edge Index
+Edge Index
+----------
 
 Every [edge collection](../Appendix/Glossary.md#edge-collection) also has an 
 automatically created *edge index*. The edge index provides quick access to
@@ -77,7 +91,8 @@ indexes.
 An edge index cannot be dropped or changed.
 
 
-### Hash Index
+Hash Index
+----------
 
 A hash index can be used to quickly find documents with specific attribute values.
 The hash index is unsorted, so it supports equality lookups but no range queries or sorting.
@@ -144,7 +159,8 @@ Hash indexes support [indexing array values](#indexing-array-values) if the inde
 attribute name is extended with a <i>[\*]</i>.
 
 
-### Skiplist Index
+Skiplist Index
+--------------
 
 A skiplist is a sorted index structure. It can be used to quickly find documents 
 with specific attribute values, for range queries and for returning documents from
@@ -175,7 +191,7 @@ the `SORT` clause of the query in the same order as they appear in the index def
 Skiplist indexes are always created in ascending order, but they can be used to access
 the indexed elements in both ascending or descending order. However, for a combined index
 (an index on multiple attributes) this requires that the sort orders in a single query
-as specified in the `SORT` clause must be either all ascending (optionally ommitted 
+as specified in the `SORT` clause must be either all ascending (optionally omitted 
 as ascending is the default) or all descending. 
 
 For example, if the skiplist index is created on attributes `value1` and `value2` 
@@ -236,7 +252,53 @@ Skiplist indexes support [indexing array values](#indexing-array-values) if the 
 attribute name is extended with a <i>[\*]</i>`.
 
 
-### Persistent Index
+Geo Index
+---------
+
+Users can create additional geo indexes on one or multiple attributes in collections. 
+A geo index is used to find places on the surface of the earth fast. 
+
+The geo index stores two-dimensional coordinates. It can be created on either two 
+separate document attributes (latitude and longitude) or a single array attribute that
+contains both latitude and longitude. Latitude and longitude must be numeric values.
+
+The geo index provides operations to find documents with coordinates nearest to a given 
+comparison coordinate, and to find documents with coordinates that are within a specifiable
+radius around a comparison coordinate.
+
+The geo index is used via dedicated functions in AQL, the simple queries
+functions and it is implicitly applied when in AQL a SORT or FILTER is used with
+the distance function. Otherwise it will not be used for other types of queries
+or conditions.
+
+
+Fulltext Index
+--------------
+
+A fulltext index can be used to find words, or prefixes of words inside documents. 
+A fulltext index can be created on a single attribute only, and will index all words 
+contained in documents that have a textual value in that attribute. Only words with a (specifiable) 
+minimum length are indexed. Word tokenization is done using the word boundary analysis 
+provided by libicu, which is taking into account the selected language provided at 
+server start. Words are indexed in their lower-cased form. The index supports complete 
+match queries (full words) and prefix queries, plus basic logical operations such as 
+`and`, `or` and `not` for combining partial results.
+
+The fulltext index is sparse, meaning it will only index documents for which the index
+attribute is set and contains a string value. Additionally, only words with a configurable
+minimum length will be included in the index.
+
+The fulltext index is used via dedicated functions in AQL or the simple queries, but will
+not be enabled for other types of queries or conditions.
+
+
+Persistent Index
+----------------
+
+{% hint 'warning' %}
+this index should not be used anymore, instead use the rocksdb storage engine
+with either the *skiplist* or *hash* index.
+{% endhint %}
 
 The persistent index is a sorted index with persistence. The index entries are written to
 disk when documents are stored or updated. That means the index entries do not need to be
@@ -260,44 +322,8 @@ operations, but only if either all index attributes are provided in a query, or 
 prefix of the index attributes is specified.
 
 
-### Geo Index
-
-Users can create additional geo indexes on one or multiple attributes in collections. 
-A geo index is used to find places on the surface of the earth fast. 
-
-The geo index stores two-dimensional coordinates. It can be created on either two 
-separate document attributes (latitude and longitude) or a single array attribute that
-contains both latitude and longitude. Latitude and longitude must be numeric values.
-
-The geo index provides operations to find documents with coordinates nearest to a given 
-comparison coordinate, and to find documents with coordinates that are within a specifiable
-radius around a comparison coordinate.
-
-The geo index is used via dedicated functions in AQL, the simple queries
-functions and it is implicitly applied when in AQL a SORT or FILTER is used with
-the distance function. Otherwise it will not be used for other types of queries
-or conditions.
-
-
-### Fulltext Index
-
-A fulltext index can be used to find words, or prefixes of words inside documents. 
-A fulltext index can be created on a single attribute only, and will index all words 
-contained in documents that have a textual value in that attribute. Only words with a (specifiable) 
-minimum length are indexed. Word tokenization is done using the word boundary analysis 
-provided by libicu, which is taking into account the selected language provided at 
-server start. Words are indexed in their lower-cased form. The index supports complete 
-match queries (full words) and prefix queries, plus basic logical operations such as 
-`and`, `or` and `not` for combining partial results.
-
-The fulltext index is sparse, meaning it will only index documents for which the index
-attribute is set and contains a string value. Additionally, only words with a configurable
-minimum length will be included in the index.
-
-The fulltext index is used via dedicated functions in AQL or the simple queries, but will
-not be enabled for other types of queries or conditions.
-
-### Indexing attributes and sub-attributes
+Indexing attributes and sub-attributes
+--------------------------------------
 
 Top-level as well as nested attributes can be indexed. For attributes at the top level,
 the attribute names alone are required. To index a single field, pass an array with a
@@ -319,7 +345,8 @@ db.posts.ensureIndex({ type: "hash", fields: [ "name.last" ] })
 db.posts.ensureIndex({ type: "hash", fields: [ "name.last", "name.first" ] })
 ```
 
-### Indexing array values
+Indexing array values
+---------------------
 
 If an index attribute contains an array, ArangoDB will store the entire array as the index value
 by default. Accessing individual members of the array via the index is not possible this
@@ -404,7 +431,7 @@ value `bar` will be inserted only once:
 db.posts.insert({ tags: [ "foobar", "bar", "bar" ] });
 ```
 
-This is done to avoid redudant storage of the same index value for the same document, which
+This is done to avoid redundant storage of the same index value for the same document, which
 would not provide any benefit.
 
 If an array index is declared **unique**, the de-duplication of array values will happen before 
@@ -470,22 +497,27 @@ only if the query filters on the indexed attribute using the `IN` operator. The 
 comparison operators (`==`, `!=`, `>`, `>=`, `<`, `<=`, `ANY`, `ALL`, `NONE`) currently
 cannot use array indexes.
 
-### Vertex centric indexes
+Vertex centric indexes
+----------------------
 
 As mentioned above, the most important indexes for graphs are the edge
 indexes, indexing the `_from` and `_to` attributes of edge collections.
 They provide very quick access to all edges originating in or arriving
-at a given vertex, which allows to quickly find all neighbours of a vertex
+at a given vertex, which allows to quickly find all neighbors of a vertex
 in a graph.
 
 In many cases one would like to run more specific queries, for example
-finding amongst the edges originating in a given vertex only those
-with the 20 latest time stamps. Exactly this is achieved with "vertex 
-centric indexes". In a sense these are localized indexes for an edge
-collection, which sit at every single vertex.
+finding amongst the edges originating from a given vertex only those
+with a timestamp greater than or equal to some date and time. Exactly this
+is achieved with "vertex centric indexes". In a sense these are localized
+indexes for an edge collection, which sit at every single vertex.
 
 Technically, they are implemented in ArangoDB as indexes, which sort the 
-complete edge collection first by `_from` and then by other attributes.
+complete edge collection first by `_from` and then by other attributes
+for _OUTBOUND_ traversals, or first by `_to` and then by other attributes
+for _INBOUND_ traversals. For traversals in _ANY_ direction two indexes
+are needed, one with `_from` and the other with `_to` as first indexed field.
+
 If we for example have a skiplist index on the attributes `_from` and 
 `timestamp` of an edge collection, we can answer the above question
 very quickly with a single range lookup in the index.
@@ -503,15 +535,78 @@ would simply do
 db.edges.ensureIndex({"type":"skiplist", "fields": ["_from", "timestamp"]});
 ```
 
-Then, queries like
+in arangosh. Then, queries like
 
 ```js
 FOR v, e, p IN 1..1 OUTBOUND "V/1" edges
-  FILTER e.timestamp ALL >= "2016-11-09"
+  FILTER e.timestamp >= "2018-07-09"
   RETURN p
 ```
 
 will be considerably faster in case there are many edges originating
-in vertex `"V/1"` but only few with a recent time stamp.
+from vertex `"V/1"` but only few with a recent time stamp. Note that the
+optimizer may prefer the default edge index over vertex centric indexes
+based on the costs it estimates, even if a vertex centric index might
+in fact be faster. Vertex centric indexes are more likely to be chosen
+for highly connected graphs and with RocksDB storage engine.
 
+
+Creating Indexes in Background
+------------------------------
+
+{% hint 'info' %}
+This section only applies to the *rocksdb* storage engine
+{% endhint %}
+
+Creating new indexes is by default done under an exclusive collection lock. This means
+that the collection (or the respective shards) are not available as long as the index
+is created. This "foreground" index creation can be undesirable, if you have to perform it
+on a live system without a dedicated maintenance window.
+
+**STARTING FROM VERSION vX.Y.Z**, indexes can also be created in "background", not using an exclusive lock during the creation. 
+The collection remains available, other CRUD operations can run on the collection while the index is created.
+This can be achieved by using the *inBackground* option.
+
+To create a indexes in the background in *arangosh* just specify `inBackground: true`, 
+like in the following examples:
+
+```js
+// create the hash index in the background
+db.collection.ensureIndex({ type: "hash", fields: [ "value" ], unique: false, inBackground: true });
+db.collection.ensureIndex({ type: "hash", fields: [ "email" ], unique: true, inBackground: true });
+
+// skiplist indexes work also of course
+db.collection.ensureIndex({ type :"skiplist", fields: ["abc", "cdef"], unique: true, inBackground: true });
+db.collection.ensureIndex({ type :"skiplist", fields: ["abc", "cdef"], sparse: true, inBackground: true });
+
+// also supported on fulltext indexes
+db.collection.ensureIndex({ type: "geo", fields: [ "latitude", "longitude"], inBackground: true });
+db.collection.ensureIndex({ type: "geo", fields: [ "latitude", "longitude"], inBackground: true });
+db.collection.ensureIndex({ type: "fulltext", fields: [ "text" ], minLength: 4, inBackground: true })
+```
+
+### Behavior
+
+Indexes that are still in the build process will not be visible via the ArangoDB API. Nevertheless it is not
+possible to create the same index twice via the *ensureIndex* API. AQL Queries will not use these indexes either
+until the indexes report back as finished. Note that the initial *ensureIndex* call or HTTP request will block until the index is completely ready. Existing single-threaded client programs can safely specify the 
+*inBackground* option as *true* and continue to work as before.
+
+{% hint 'info' %}
+Should you be building an index in the background you cannot rename or drop the collection.
+These operations will block until the index creation is finished.
+{% endhint %}
+
+Interrupted index build (i.e. due to a server crash) will remove the partially build index. 
+In the ArangoDB cluster the index might then be automatically recreated on affected shards.
+
+### Performance
+
+The background index creation might be slower than the "foreground" index creation and require more RAM. 
+Under a write heavy load (specifically many remove, update or replace) operations, 
+the background index creation needs to keep a list of removed documents in RAM. This might become unsustainable
+if this list grows to tens of millions of entries.
+
+Building an index is always a write heavy operation (internally), it is always a good idea to build indexes
+during times with less load.
 

@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2016 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2018-2018 ArangoDB GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
 /// you may not use this file except in compliance with the License.
@@ -24,51 +24,55 @@
 
 #include "Agency/AgentInterface.h"
 #include "Agency/Job.h"
+#include "Cluster/ClusterInfo.h"
 #include "Random/RandomGenerator.h"
 
 using namespace arangodb::consensus;
 
 RemoveFollower::RemoveFollower(Node const& snapshot, AgentInterface* agent,
-                               std::string const& jobId,
-                               std::string const& creator,
+                               std::string const& jobId, std::string const& creator,
                                std::string const& database,
-                               std::string const& collection,
-                               std::string const& shard)
+                               std::string const& collection, std::string const& shard)
     : Job(NOTFOUND, snapshot, agent, jobId, creator),
       _database(database),
       _collection(collection),
       _shard(shard) {}
 
 RemoveFollower::RemoveFollower(Node const& snapshot, AgentInterface* agent,
-                         JOB_STATUS status, std::string const& jobId)
+                               JOB_STATUS status, std::string const& jobId)
     : Job(status, snapshot, agent, jobId) {
   // Get job details from agency:
-  try {
-    std::string path = pos[status] + _jobId + "/";
-    _database = _snapshot.get(path + "database").getString();
-    _collection = _snapshot.get(path + "collection").getString();
-    _shard = _snapshot.get(path + "shard").getString();
-    _creator = _snapshot.get(path + "creator").getString();
-  } catch (std::exception const& e) {
+  std::string path = pos[status] + _jobId + "/";
+  auto tmp_database = _snapshot.hasAsString(path + "database");
+  auto tmp_collection = _snapshot.hasAsString(path + "collection");
+  auto tmp_shard = _snapshot.hasAsString(path + "shard");
+  auto tmp_creator = _snapshot.hasAsString(path + "creator");
+
+  if (tmp_database.second && tmp_collection.second && tmp_shard.second &&
+      tmp_creator.second) {
+    _database = tmp_database.first;
+    _collection = tmp_collection.first;
+    _shard = tmp_shard.first;
+    _creator = tmp_creator.first;
+  } else {
     std::stringstream err;
-    err << "Failed to find job " << _jobId << " in agency: " << e.what();
+    err << "Failed to find job " << _jobId << " in agency.";
     LOG_TOPIC(ERR, Logger::SUPERVISION) << err.str();
-    finish("", _shard, false, err.str());
+    finish("", tmp_shard.first, false, err.str());
     _status = FAILED;
   }
 }
 
 RemoveFollower::~RemoveFollower() {}
 
-void RemoveFollower::run() {
-  runHelper("", _shard);
-}
+void RemoveFollower::run() { runHelper("", _shard); }
 
 bool RemoveFollower::create(std::shared_ptr<VPackBuilder> envelope) {
-  LOG_TOPIC(INFO, Logger::SUPERVISION) << "Todo: RemoveFollower(s) "
-    << " to shard " << _shard << " in collection " << _collection;
+  LOG_TOPIC(DEBUG, Logger::SUPERVISION)
+      << "Todo: RemoveFollower(s) "
+      << " to shard " << _shard << " in collection " << _collection;
 
-  bool selfCreate = (envelope == nullptr); // Do we create ourselves?
+  bool selfCreate = (envelope == nullptr);  // Do we create ourselves?
 
   if (selfCreate) {
     _jb = std::make_shared<Builder>();
@@ -86,7 +90,8 @@ bool RemoveFollower::create(std::shared_ptr<VPackBuilder> envelope) {
   std::string path = toDoPrefix + _jobId;
 
   _jb->add(VPackValue(path));
-  { VPackObjectBuilder guard(_jb.get());
+  {
+    VPackObjectBuilder guard(_jb.get());
     _jb->add("creator", VPackValue(_creator));
     _jb->add("type", VPackValue("removeFollower"));
     _jb->add("database", VPackValue(_database));
@@ -126,24 +131,25 @@ bool RemoveFollower::start() {
     finish("", "", true, "collection has been dropped in the meantime");
     return false;
   }
-  Node collection = _snapshot.get(planColPrefix + _database + "/" + _collection);
+  Node collection =
+      _snapshot.hasAsNode(planColPrefix + _database + "/" + _collection).first;
   if (collection.has("distributeShardsLike")) {
     finish("", "", false,
            "collection must not have 'distributeShardsLike' attribute");
     return false;
   }
-  
+
   // Look at Plan:
   std::string planPath =
       planColPrefix + _database + "/" + _collection + "/shards/" + _shard;
 
-  Slice planned = _snapshot.get(planPath).slice();
+  Slice planned = _snapshot.hasAsSlice(planPath).first;
 
   TRI_ASSERT(planned.isArray());
 
   // First check that we still have too many followers for the current
   // `replicationFactor`:
-  size_t desiredReplFactor = collection.get("replicationFactor").getUInt();
+  size_t desiredReplFactor = collection.hasAsUInt("replicationFactor").first;
   size_t actualReplFactor = planned.length();
   if (actualReplFactor <= desiredReplFactor) {
     finish("", "", true, "job no longer necessary, have few enough replicas");
@@ -152,23 +158,25 @@ bool RemoveFollower::start() {
 
   // Check that the shard is not locked:
   if (_snapshot.has(blockedShardsPrefix + _shard)) {
-    LOG_TOPIC(DEBUG, Logger::SUPERVISION) << "shard " << _shard
-      << " is currently locked, not starting RemoveFollower job " << _jobId;
+    LOG_TOPIC(DEBUG, Logger::SUPERVISION)
+        << "shard " << _shard
+        << " is currently locked, not starting RemoveFollower job " << _jobId;
     return false;
   }
 
   // Find the group of shards that are distributed alike:
-  std::vector<Job::shard_t> shardsLikeMe
-      = clones(_snapshot, _database, _collection, _shard);
+  std::vector<Job::shard_t> shardsLikeMe =
+      clones(_snapshot, _database, _collection, _shard);
 
   // Now find some new servers to remove:
-  std::unordered_map<std::string, int> overview;   // get an overview over the servers
-    // -1 : not "GOOD", can be in sync, or leader, or not
-    // >=0: number of servers for which it is in sync or confirmed leader
+  std::unordered_map<std::string, int> overview;  // get an overview over the servers
+                                                  // -1 : not "GOOD", can be in sync, or leader, or not
+                                                  // >=0: number of servers for which it is in sync or confirmed
+                                                  // leader
   bool leaderBad = false;
   for (auto const& srv : VPackArrayIterator(planned)) {
     std::string serverName = srv.copyString();
-    if (checkServerGood(_snapshot, serverName) == "GOOD") {
+    if (checkServerHealth(_snapshot, serverName) == "GOOD") {
       overview.emplace(serverName, 0);
     } else {
       overview.emplace(serverName, -1);
@@ -178,26 +186,25 @@ bool RemoveFollower::start() {
     }
   }
   doForAllShards(_snapshot, _database, shardsLikeMe,
-    [&planned, &overview, &leaderBad](Slice plan,
-                                            Slice current,
-                                            std::string& planPath) {
-      if (current.length() > 0) {
-        if (current[0].copyString() != planned[0].copyString()) {
-          leaderBad = true;
-        } else {
-          for (auto const s : VPackArrayIterator(current)) {
-            auto it = overview.find(s.copyString());
-            if (it != overview.end()) {
-              if (it->second >= 0) {
-                ++(it->second);
-              }
-            }
-          }
-        }
-      } else {
-        leaderBad = true;
-      }
-    });
+                 [&planned, &overview, &leaderBad](Slice plan, Slice current,
+                                                   std::string& planPath) {
+                   if (current.length() > 0) {
+                     if (current[0].copyString() != planned[0].copyString()) {
+                       leaderBad = true;
+                     } else {
+                       for (auto const s : VPackArrayIterator(current)) {
+                         auto it = overview.find(s.copyString());
+                         if (it != overview.end()) {
+                           if (it->second >= 0) {
+                             ++(it->second);
+                           }
+                         }
+                       }
+                     }
+                   } else {
+                     leaderBad = true;
+                   }
+                 });
 
   size_t inSyncCount = 0;
   size_t notGoodCount = 0;
@@ -211,30 +218,47 @@ bool RemoveFollower::start() {
 
   // Check that leader is OK for all shards:
   if (leaderBad) {
-    LOG_TOPIC(DEBUG, Logger::SUPERVISION) << "shard " << _shard
-      << " does not have a leader that has confirmed leadership, waiting, "
-      "jobId=" << _jobId;
+    LOG_TOPIC(DEBUG, Logger::SUPERVISION)
+        << "shard " << _shard
+        << " does not have a leader that has confirmed leadership, waiting, "
+           "jobId="
+        << _jobId;
     return false;
   }
 
   // Check that we have enough:
   if (inSyncCount < desiredReplFactor) {
-    LOG_TOPIC(DEBUG, Logger::SUPERVISION) << "shard " << _shard
-      << " does not have enough in sync followers to remove one, waiting, "
-      "jobId=" << _jobId;
+    LOG_TOPIC(DEBUG, Logger::SUPERVISION)
+        << "shard " << _shard
+        << " does not have enough in sync followers to remove one, waiting, "
+           "jobId="
+        << _jobId;
     return false;
   }
 
   // We now know actualReplFactor >= inSyncCount + noGoodCount and
   //                  inSyncCount >= desiredReplFactor
   // Let notInSyncCount = actualReplFactor - (inSyncCount + noGoodCount)
-  // To reduce actualReplFactor down to desiredReplFactor we 
+  // To reduce actualReplFactor down to desiredReplFactor we
   // Randomly choose enough servers:
   std::unordered_set<std::string> chosenToRemove;
   size_t currentReplFactor = actualReplFactor;  // will be counted down
   if (currentReplFactor > desiredReplFactor) {
     // First choose BAD servers:
-    for (auto const& pair : overview) {
+
+    // Iterate the list of planned servers in reverse order,
+    // because the last must be removed first
+    std::vector<ServerID> reversedPlannedServers{planned.length()};
+    {
+      auto rDbIt = reversedPlannedServers.rbegin();
+      for (auto const& vPackIt : VPackArrayIterator(planned)) {
+        *rDbIt = vPackIt.copyString();
+        rDbIt++;
+      }
+    }
+
+    for (auto const& it : reversedPlannedServers) {
+      auto const pair = *overview.find(it);
       if (pair.second == -1) {
         chosenToRemove.insert(pair.first);
         --currentReplFactor;
@@ -245,9 +269,9 @@ bool RemoveFollower::start() {
     }
     if (currentReplFactor > desiredReplFactor) {
       // Now choose servers that are not in sync for all shards:
-      for (auto const& pair : overview) {
-        if (pair.second >= 0 &&
-            static_cast<size_t>(pair.second) < shardsLikeMe.size()) {
+      for (auto const& it : reversedPlannedServers) {
+        auto const pair = *overview.find(it);
+        if (pair.second >= 0 && static_cast<size_t>(pair.second) < shardsLikeMe.size()) {
           chosenToRemove.insert(pair.first);
           --currentReplFactor;
         }
@@ -257,7 +281,8 @@ bool RemoveFollower::start() {
       }
       if (currentReplFactor > desiredReplFactor) {
         // Finally choose servers that are in sync, but are no leader:
-        for (auto const& pair : overview) {
+        for (auto const& it : reversedPlannedServers) {
+          auto const pair = *overview.find(it);
           if (pair.second >= 0 &&
               static_cast<size_t>(pair.second) >= shardsLikeMe.size() &&
               pair.first != planned[0].copyString()) {
@@ -283,18 +308,18 @@ bool RemoveFollower::start() {
   Builder todo, trx;
 
   // Get todo entry
-  { VPackArrayBuilder guard(&todo);
+  {
+    VPackArrayBuilder guard(&todo);
     // When create() was done with the current snapshot, then the job object
     // will not be in the snapshot under ToDo, but in this case we find it
     // in _jb:
     if (_jb == nullptr) {
-      try {
-        _snapshot.get(toDoPrefix + _jobId).toBuilder(todo);
-      } catch (std::exception const&) {
+      auto tmp_todo = _snapshot.hasAsBuilder(toDoPrefix + _jobId, todo);
+      if (!tmp_todo.second) {
         // Just in case, this is never going to happen, since we will only
         // call the start() method if the job is already in ToDo.
-        LOG_TOPIC(INFO, Logger::SUPERVISION)
-          << "Failed to get key " + toDoPrefix + _jobId + " from agency snapshot";
+        LOG_TOPIC(INFO, Logger::SUPERVISION) << "Failed to get key " + toDoPrefix + _jobId +
+                                                    " from agency snapshot";
         return false;
       }
     } else {
@@ -303,61 +328,65 @@ bool RemoveFollower::start() {
       } catch (std::exception const& e) {
         // Just in case, this is never going to happen, since when _jb is
         // set, then the current job is stored under ToDo.
-        LOG_TOPIC(WARN, Logger::SUPERVISION) << e.what() << ": "
-          << __FILE__ << ":" << __LINE__;
+        LOG_TOPIC(WARN, Logger::SUPERVISION)
+            << e.what() << ": " << __FILE__ << ":" << __LINE__;
         return false;
       }
     }
   }
-  
-  // Enter pending, remove todo, block toserver
-  { VPackArrayBuilder listOfTransactions(&trx);
 
-    { VPackObjectBuilder objectForMutation(&trx);
+  // Enter pending, remove todo, block toserver
+  {
+    VPackArrayBuilder listOfTransactions(&trx);
+
+    {
+      VPackObjectBuilder objectForMutation(&trx);
 
       addPutJobIntoSomewhere(trx, "Finished", todo.slice()[0]);
       addRemoveJobFromSomewhere(trx, "ToDo", _jobId);
 
       // --- Plan changes
       doForAllShards(_snapshot, _database, shardsLikeMe,
-        [&trx, &chosenToRemove](Slice plan, Slice current,
-                                      std::string& planPath) {
-          trx.add(VPackValue(planPath));
-          { VPackArrayBuilder serverList(&trx);
-            for (auto const& srv : VPackArrayIterator(plan)) {
-              if (chosenToRemove.find(srv.copyString()) ==
-                  chosenToRemove.end()) {
-                trx.add(srv);
-              }
-            }
-          }
-        });
+                     [&trx, &chosenToRemove](Slice plan, Slice current, std::string& planPath) {
+                       trx.add(VPackValue(planPath));
+                       {
+                         VPackArrayBuilder serverList(&trx);
+                         for (auto const& srv : VPackArrayIterator(plan)) {
+                           if (chosenToRemove.find(srv.copyString()) ==
+                               chosenToRemove.end()) {
+                             trx.add(srv);
+                           }
+                         }
+                       }
+                     });
 
       addIncreasePlanVersion(trx);
     }  // mutation part of transaction done
     // Preconditions
-    { VPackObjectBuilder precondition(&trx);
+    {
+      VPackObjectBuilder precondition(&trx);
       // --- Check that Planned servers are still as we expect
       addPreconditionUnchanged(trx, planPath, planned);
       addPreconditionShardNotBlocked(trx, _shard);
       for (auto const& srv : kept) {
-        addPreconditionServerGood(trx, srv);
+        addPreconditionServerHealth(trx, srv, "GOOD");
       }
-    }   // precondition done
-  }  // array for transaction done
+    }  // precondition done
+  }    // array for transaction done
 
   // Transact to agency
   write_ret_t res = singleWriteTransaction(_agent, trx);
 
   if (res.accepted && res.indices.size() == 1 && res.indices[0]) {
     _status = FINISHED;
-    LOG_TOPIC(INFO, Logger::SUPERVISION)
-      << "Pending: RemoveFollower(s) to shard " << _shard << " in collection "
-      << _collection;
+    LOG_TOPIC(DEBUG, Logger::SUPERVISION)
+        << "Pending: RemoveFollower(s) to shard " << _shard << " in collection "
+        << _collection;
     return true;
   }
-  
-  LOG_TOPIC(INFO, Logger::SUPERVISION) << "Start precondition failed for RemoveFollower Job " + _jobId;
+
+  LOG_TOPIC(INFO, Logger::SUPERVISION)
+      << "Start precondition failed for RemoveFollower Job " + _jobId;
   return false;
 }
 
@@ -366,17 +395,17 @@ JOB_STATUS RemoveFollower::status() {
     return _status;
   }
 
-  TRI_ASSERT(false);   // PENDING is not an option for this job, since it
-                       // travels directly from ToDo to Finished or Failed
+  TRI_ASSERT(false);  // PENDING is not an option for this job, since it
+                      // travels directly from ToDo to Finished or Failed
   return _status;
 }
 
 arangodb::Result RemoveFollower::abort() {
-
   Result result;
   // We can assume that the job is in ToDo or not there:
   if (_status == NOTFOUND || _status == FINISHED || _status == FAILED) {
-    result = Result(1, "Failed aborting RemoveFollower job beyond pending stage");
+    result =
+        Result(1, "Failed aborting RemoveFollower job beyond pending stage");
     return result;
   }
   // Can now only be TODO or PENDING
@@ -387,6 +416,4 @@ arangodb::Result RemoveFollower::abort() {
 
   TRI_ASSERT(false);  // cannot happen, since job moves directly to FINISHED
   return result;
-  
 }
-

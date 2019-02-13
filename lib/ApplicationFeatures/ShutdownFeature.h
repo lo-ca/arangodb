@@ -26,14 +26,15 @@
 #include "ApplicationFeatures/ApplicationFeature.h"
 
 namespace arangodb {
+
 class ShutdownFeature final : public application_features::ApplicationFeature {
  public:
-  ShutdownFeature(application_features::ApplicationServer* server,
+  ShutdownFeature(application_features::ApplicationServer& server,
                   std::vector<std::string> const& features);
 
- public:
   void start() override final;
 };
-}
+
+}  // namespace arangodb
 
 #endif

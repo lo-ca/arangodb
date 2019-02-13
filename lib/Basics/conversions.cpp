@@ -22,11 +22,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include "conversions.h"
-
-//YYY #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
-//YYY #warning FRANK this files should be replaces by StringUtils and Co
-//YYY #endif
-
 #include "Basics/tri-strings.h"
 
 static char const* const HEX = "0123456789ABCDEF";
@@ -52,9 +47,9 @@ int TRI_IntHex(char ch, int errorValue) {
 ////////////////////////////////////////////////////////////////////////////////
 
 double TRI_DoubleString(char const* str) {
-  TRI_set_errno(TRI_ERROR_NO_ERROR);
-
   char* endptr;
+  errno = TRI_ERROR_NO_ERROR;
+  TRI_set_errno(TRI_ERROR_NO_ERROR);
   double result = strtod(str, &endptr);
 
   while (isspace(*endptr)) {
@@ -63,8 +58,7 @@ double TRI_DoubleString(char const* str) {
 
   if (*endptr != '\0') {
     TRI_set_errno(TRI_ERROR_ILLEGAL_NUMBER);
-  } else if (errno == ERANGE &&
-             (result == HUGE_VAL || result == -HUGE_VAL || result == 0)) {
+  } else if (errno == ERANGE && (result == HUGE_VAL || result == -HUGE_VAL || result == 0)) {
     TRI_set_errno(TRI_ERROR_NUMERIC_OVERFLOW);
   }
 
@@ -85,6 +79,7 @@ int32_t TRI_Int32String(char const* str) {
   struct reent buffer;
 #endif
 
+  errno = TRI_ERROR_NO_ERROR;
   TRI_set_errno(TRI_ERROR_NO_ERROR);
 
 #if defined(TRI_HAVE_STRTOL_R)
@@ -142,6 +137,7 @@ uint32_t TRI_UInt32String(char const* str) {
   struct reent buffer;
 #endif
 
+  errno = TRI_ERROR_NO_ERROR;
   TRI_set_errno(TRI_ERROR_NO_ERROR);
 
 #if defined(TRI_HAVE_STRTOUL_R)
@@ -149,7 +145,7 @@ uint32_t TRI_UInt32String(char const* str) {
 #elif defined(TRI_HAVE__STRTOUL_R)
   result = _strtoul_r(&buffer, str, &endptr, 10);
 #else
-  result = (uint32_t) strtoul(str, &endptr, 10);
+  result = (uint32_t)strtoul(str, &endptr, 10);
 #endif
 
   while (isspace(*endptr)) {
@@ -577,28 +573,6 @@ size_t TRI_StringUInt64InPlace(uint64_t attr, char* buffer) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-/// @brief convert to string from uint32
-////////////////////////////////////////////////////////////////////////////////
-
-char* TRI_StringUInt32(uint32_t attr) {
-  char buffer[11];
-  size_t len = TRI_StringUInt32InPlace(attr, (char*)&buffer);
-
-  return TRI_DuplicateString(buffer, len);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief convert to string from uint64
-////////////////////////////////////////////////////////////////////////////////
-
-char* TRI_StringUInt64(uint64_t attr) {
-  char buffer[21];
-  size_t len = TRI_StringUInt64InPlace(attr, (char*)&buffer);
-
-  return TRI_DuplicateString(buffer, len);
-}
-
-////////////////////////////////////////////////////////////////////////////////
 /// @brief convert to hex string from uint32, using the specified buffer.
 /// A NUL-byte will be appended at the end.
 /// It is the caller's responsibility to ensure the buffer is big enough to
@@ -845,8 +819,7 @@ std::string TRI_StringTimeStamp(double stamp, bool useLocalTime) {
 
   if (useLocalTime) {
     TRI_localtime(tt, &tb);
-  }
-  else {
+  } else {
     TRI_gmtime(tt, &tb);
   }
   len = strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &tb);

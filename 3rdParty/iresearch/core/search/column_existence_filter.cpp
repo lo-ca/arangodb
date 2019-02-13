@@ -36,14 +36,19 @@ class column_existence_iterator final : public irs::doc_iterator_base {
   explicit column_existence_iterator(
       const irs::sub_reader& reader,
       const irs::attribute_store& prepared_filter_attrs,
-      irs::columnstore_iterator::ptr&& it,
+      irs::doc_iterator::ptr&& it,
       const irs::order::prepared& ord,
       uint64_t docs_count)
     : doc_iterator_base(ord),
       it_(std::move(it)) {
     assert(it_);
+
     // make doc_id accessible via attribute
     attrs_.emplace(doc_);
+
+    // make doc_payload accessible via attribute
+    attrs_.emplace<irs::payload_iterator>() =
+      it_->attributes().get<irs::payload_iterator>();
 
     // set estimation value
     estimate(docs_count);
@@ -73,14 +78,14 @@ class column_existence_iterator final : public irs::doc_iterator_base {
   }
 
   virtual irs::doc_id_t value() const NOEXCEPT override {
-    doc_.value = it_->value().first;
+    doc_.value = it_->value();
 
     return doc_.value;
   }
 
  private:
   mutable irs::document doc_; // modified during value()
-  irs::columnstore_iterator::ptr it_;
+  irs::doc_iterator::ptr it_;
   irs::order::prepared::scorers scorers_;
 }; // column_existence_iterator
 
@@ -177,14 +182,14 @@ NS_ROOT
 // --SECTION--                                by_column_existence implementation
 // -----------------------------------------------------------------------------
 
-DEFINE_FILTER_TYPE(by_column_existence);
-DEFINE_FACTORY_DEFAULT(by_column_existence);
+DEFINE_FILTER_TYPE(by_column_existence)
+DEFINE_FACTORY_DEFAULT(by_column_existence)
 
 by_column_existence::by_column_existence() NOEXCEPT
   : filter(by_column_existence::type()) {
 }
 
-bool by_column_existence::equals(const filter& rhs) const {
+bool by_column_existence::equals(const filter& rhs) const NOEXCEPT {
   const auto& trhs = static_cast<const by_column_existence&>(rhs);
 
   return filter::equals(rhs)
@@ -192,7 +197,7 @@ bool by_column_existence::equals(const filter& rhs) const {
     && prefix_match_ == trhs.prefix_match_;
 }
 
-size_t by_column_existence::hash() const {
+size_t by_column_existence::hash() const NOEXCEPT {
   size_t seed = 0;
   ::boost::hash_combine(seed, filter::hash());
   ::boost::hash_combine(seed, field_);
@@ -208,8 +213,10 @@ filter::prepared::ptr by_column_existence::prepare(
 ) const {
   attribute_store attrs;
 
-  // skip filed-level/term-level statistics because there are no fields/terms
-  order.prepare_stats().finish(attrs, reader);
+  // skip field-level/term-level statistics because there are no explicit
+  // fields/terms, but still collect index-level statistics
+  // i.e. all fields and terms implicitly match
+  order.prepare_collectors(attrs, reader);
 
   irs::boost::apply(attrs, boost() * filter_boost); // apply boost
 

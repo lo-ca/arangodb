@@ -21,11 +21,11 @@
 /// @author Dr. Frank Celler
 ////////////////////////////////////////////////////////////////////////////////
 
-#include "v8-vocbaseprivate.h"
-#include "Basics/conversions.h"
 #include "Basics/StaticStrings.h"
-#include "VocBase/KeyGenerator.h"
+#include "Basics/conversions.h"
 #include "V8/v8-conv.h"
+#include "VocBase/KeyGenerator.h"
+#include "v8-vocbaseprivate.h"
 
 using namespace arangodb;
 using namespace arangodb::basics;
@@ -34,20 +34,20 @@ using namespace arangodb::basics;
 /// @brief get the vocbase pointer from the current V8 context
 ////////////////////////////////////////////////////////////////////////////////
 
-TRI_vocbase_t* GetContextVocBase(v8::Isolate* isolate) {
+TRI_vocbase_t& GetContextVocBase(v8::Isolate* isolate) {
   TRI_GET_GLOBALS();
 
   TRI_ASSERT(v8g->_vocbase != nullptr);
   TRI_ASSERT(!v8g->_vocbase->isDangling());
-  return static_cast<TRI_vocbase_t*>(v8g->_vocbase);
+
+  return *static_cast<TRI_vocbase_t*>(v8g->_vocbase);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief checks if argument is a document identifier
 ////////////////////////////////////////////////////////////////////////////////
 
-static bool ParseDocumentHandle(v8::Handle<v8::Value> const arg,
-                                std::string& collectionName,
+static bool ParseDocumentHandle(v8::Handle<v8::Value> const arg, std::string& collectionName,
                                 std::unique_ptr<char[]>& key) {
   TRI_ASSERT(collectionName.empty());
 
@@ -65,7 +65,7 @@ static bool ParseDocumentHandle(v8::Handle<v8::Value> const arg,
 
   // collection name / document key
   size_t split;
-  if (TRI_ValidateDocumentIdKeyGenerator(*str, str.length(), &split)) {
+  if (KeyGenerator::validateId(*str, str.length(), &split)) {
     collectionName = std::string(*str, split);
     auto const length = str.length() - split - 1;
     auto buffer = new char[length + 1];
@@ -76,7 +76,7 @@ static bool ParseDocumentHandle(v8::Handle<v8::Value> const arg,
   }
 
   // document key only
-  if (TraditionalKeyGenerator::validateKey(*str, str.length())) {
+  if (KeyGenerator::validateKey(*str, str.length())) {
     auto const length = str.length();
     auto buffer = new char[length + 1];
     memcpy(buffer, *str, length);
@@ -95,10 +95,8 @@ static bool ParseDocumentHandle(v8::Handle<v8::Value> const arg,
 /// will remain open afterwards!
 ////////////////////////////////////////////////////////////////////////////////
 
-bool ExtractDocumentHandle(v8::Isolate* isolate,
-                           v8::Handle<v8::Value> const val,
-                           std::string& collectionName,
-                           VPackBuilder& builder,
+bool ExtractDocumentHandle(v8::Isolate* isolate, v8::Handle<v8::Value> const val,
+                           std::string& collectionName, VPackBuilder& builder,
                            bool includeRev) {
   // reset the collection identifier and the revision
   TRI_ASSERT(collectionName.empty());
@@ -145,8 +143,7 @@ bool ExtractDocumentHandle(v8::Isolate* isolate,
       return false;
     }
     // If we get here we have a valid key
-    builder.add(StaticStrings::KeyString,
-                VPackValue(reinterpret_cast<char*>(key.get())));
+    builder.add(StaticStrings::KeyString, VPackValue(reinterpret_cast<char*>(key.get())));
 
     if (!includeRev) {
       return true;

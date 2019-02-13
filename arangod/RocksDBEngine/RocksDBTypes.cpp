@@ -25,71 +25,58 @@
 
 using namespace arangodb;
 
+/// @brief rocksdb format version
+char arangodb::rocksDBFormatVersion() { return '1'; }
+
 namespace {
 
 static RocksDBEntryType placeholder = arangodb::RocksDBEntryType::Placeholder;
 static rocksdb::Slice Placeholder(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&placeholder),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&placeholder), 1);
 
 static RocksDBEntryType database = arangodb::RocksDBEntryType::Database;
 static rocksdb::Slice Database(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&database),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&database), 1);
 
 static RocksDBEntryType collection = RocksDBEntryType::Collection;
 static rocksdb::Slice Collection(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &collection),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&collection), 1);
 
 static RocksDBEntryType counterVal = RocksDBEntryType::CounterValue;
 static rocksdb::Slice CounterValue(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &counterVal),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&counterVal), 1);
 
 static RocksDBEntryType document = RocksDBEntryType::Document;
 static rocksdb::Slice Document(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&document),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&document), 1);
 
 static RocksDBEntryType primaryIndexValue = RocksDBEntryType::PrimaryIndexValue;
 static rocksdb::Slice PrimaryIndexValue(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &primaryIndexValue),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&primaryIndexValue), 1);
 
 static RocksDBEntryType edgeIndexValue = RocksDBEntryType::EdgeIndexValue;
 static rocksdb::Slice EdgeIndexValue(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &edgeIndexValue),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&edgeIndexValue), 1);
 
 static RocksDBEntryType vpackIndexValue = RocksDBEntryType::VPackIndexValue;
 static rocksdb::Slice VPackIndexValue(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &vpackIndexValue),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&vpackIndexValue), 1);
 
 static RocksDBEntryType uniqueVPIndex = RocksDBEntryType::UniqueVPackIndexValue;
 static rocksdb::Slice UniqueVPackIndexValue(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &uniqueVPIndex),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&uniqueVPIndex), 1);
 
-static RocksDBEntryType fulltextIndexValue =
-    RocksDBEntryType::FulltextIndexValue;
+static RocksDBEntryType fulltextIndexValue = RocksDBEntryType::FulltextIndexValue;
 static rocksdb::Slice FulltextIndexValue(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &fulltextIndexValue),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&fulltextIndexValue), 1);
 
-static RocksDBEntryType geoIndexValue = RocksDBEntryType::GeoIndexValue;
+static RocksDBEntryType geoIndexValue = RocksDBEntryType::LegacyGeoIndexValue;
+static rocksdb::Slice LegacyGeoIndexValue(
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&geoIndexValue), 1);
+
+static RocksDBEntryType s2IndexValue = RocksDBEntryType::GeoIndexValue;
 static rocksdb::Slice GeoIndexValue(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &geoIndexValue),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&s2IndexValue), 1);
 
 static RocksDBEntryType view = RocksDBEntryType::View;
 static rocksdb::Slice View(
@@ -97,30 +84,20 @@ static rocksdb::Slice View(
 
 static RocksDBEntryType settingsValue = RocksDBEntryType::SettingsValue;
 static rocksdb::Slice SettingsValue(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &settingsValue),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&settingsValue), 1);
 
-static RocksDBEntryType replicationApplierConfig =
-    RocksDBEntryType::ReplicationApplierConfig;
+static RocksDBEntryType replicationApplierConfig = RocksDBEntryType::ReplicationApplierConfig;
 static rocksdb::Slice ReplicationApplierConfig(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &replicationApplierConfig),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&replicationApplierConfig), 1);
 
-static RocksDBEntryType indexEstimateValue =
-    RocksDBEntryType::IndexEstimateValue;
+static RocksDBEntryType indexEstimateValue = RocksDBEntryType::IndexEstimateValue;
 static rocksdb::Slice IndexEstimateValue(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &indexEstimateValue),
-    1);
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&indexEstimateValue), 1);
 
 static RocksDBEntryType keyGeneratorValue = RocksDBEntryType::KeyGeneratorValue;
 static rocksdb::Slice KeyGeneratorValue(
-    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(
-        &keyGeneratorValue),
-    1);
-}
+    reinterpret_cast<std::underlying_type<RocksDBEntryType>::type*>(&keyGeneratorValue), 1);
+}  // namespace
 
 char const* arangodb::rocksDBEntryTypeName(arangodb::RocksDBEntryType type) {
   switch (type) {
@@ -150,8 +127,10 @@ char const* arangodb::rocksDBEntryTypeName(arangodb::RocksDBEntryType type) {
       return "ReplicationApplierConfig";
     case arangodb::RocksDBEntryType::FulltextIndexValue:
       return "FulltextIndexValue";
+    case arangodb::RocksDBEntryType::LegacyGeoIndexValue:
+      return "LegacyGeoIndexValue";
     case arangodb::RocksDBEntryType::GeoIndexValue:
-      return "GeoIndexValue";
+      return "SphericalIndexValue";
     case arangodb::RocksDBEntryType::IndexEstimateValue:
       return "IndexEstimateValue";
     case arangodb::RocksDBEntryType::KeyGeneratorValue:
@@ -174,6 +153,8 @@ char const* arangodb::rocksDBLogTypeName(arangodb::RocksDBLogType type) {
       return "CollectionRename";
     case arangodb::RocksDBLogType::CollectionChange:
       return "CollectionChange";
+    case arangodb::RocksDBLogType::CollectionTruncate:
+      return "CollectionTruncate";
     case arangodb::RocksDBLogType::IndexCreate:
       return "IndexCreate";
     case arangodb::RocksDBLogType::IndexDrop:
@@ -184,24 +165,30 @@ char const* arangodb::rocksDBLogTypeName(arangodb::RocksDBLogType type) {
       return "ViewDrop";
     case arangodb::RocksDBLogType::ViewChange:
       return "ViewChange";
-    case arangodb::RocksDBLogType::ViewRename:
-      return "ViewRename";
-#ifdef USE_IRESEARCH
-    case arangodb::RocksDBLogType::IResearchLinkDrop:
-      return "IResearchLinkDrop";
-#endif
     case arangodb::RocksDBLogType::BeginTransaction:
       return "BeginTransaction";
+    case arangodb::RocksDBLogType::CommitTransaction:
+      return "CommitTransaction";
     case arangodb::RocksDBLogType::DocumentOperationsPrologue:
       return "DocumentOperationsPrologue";
     case arangodb::RocksDBLogType::DocumentRemove:
       return "DocumentRemove";
+    case arangodb::RocksDBLogType::DocumentRemoveV2:
+      return "DocumentRemoveV2";
     case arangodb::RocksDBLogType::DocumentRemoveAsPartOfUpdate:
       return "IgnoreRemoveAsPartOfUpdate";
     case arangodb::RocksDBLogType::SinglePut:
       return "SinglePut";
     case arangodb::RocksDBLogType::SingleRemove:
       return "SingleRemove";
+    case arangodb::RocksDBLogType::SingleRemoveV2:
+      return "SingleRemoveV2";
+    case arangodb::RocksDBLogType::FlushSync:
+      return "FlushSync";
+    case RocksDBLogType::TrackedDocumentInsert:
+      return "TrackedDocumentInsert";
+    case RocksDBLogType::TrackedDocumentRemove:
+      return "TrackedDocumentRemove";
     case arangodb::RocksDBLogType::Invalid:
       return "Invalid";
   }
@@ -230,6 +217,8 @@ rocksdb::Slice const& arangodb::rocksDBSlice(RocksDBEntryType const& type) {
       return UniqueVPackIndexValue;
     case RocksDBEntryType::FulltextIndexValue:
       return FulltextIndexValue;
+    case RocksDBEntryType::LegacyGeoIndexValue:
+      return LegacyGeoIndexValue;
     case RocksDBEntryType::GeoIndexValue:
       return GeoIndexValue;
     case RocksDBEntryType::View:
@@ -245,9 +234,4 @@ rocksdb::Slice const& arangodb::rocksDBSlice(RocksDBEntryType const& type) {
   }
 
   return Placeholder;  // avoids warning - errorslice instead ?!
-}
-
-
-char arangodb::rocksDBFormatVersion() {
-  return '0';
 }

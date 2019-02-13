@@ -19,7 +19,7 @@
 /// Copyright holder is ArangoDB GmbH, Cologne, Germany
 ///
 /// @author Jan Steemann
-/// @author Daniel H. Larkin
+/// @author Dan Larkin-York
 ////////////////////////////////////////////////////////////////////////////////
 
 #ifndef ARANGO_ROCKSDB_ROCKSDB_KEY_BOUNDS_H
@@ -71,6 +71,13 @@ class RocksDBKeyBounds {
   static RocksDBKeyBounds PrimaryIndex(uint64_t indexId);
 
   //////////////////////////////////////////////////////////////////////////////
+  /// @brief Bounds for all index-entries- within a range belonging to a
+  ///  specified primary index
+  //////////////////////////////////////////////////////////////////////////////
+  static RocksDBKeyBounds PrimaryIndex(uint64_t indexId, std::string const& lower,
+                                       std::string const& upper);
+
+  //////////////////////////////////////////////////////////////////////////////
   /// @brief Bounds for all index-entries belonging to a specified edge index
   //////////////////////////////////////////////////////////////////////////////
   static RocksDBKeyBounds EdgeIndex(uint64_t indexId);
@@ -99,10 +106,15 @@ class RocksDBKeyBounds {
   static RocksDBKeyBounds FulltextIndex(uint64_t indexId);
 
   //////////////////////////////////////////////////////////////////////////////
-  /// @brief Bounds for all entries belonging to a specified unique index
+  /// @brief Bounds for all entries belonging to specified legacy geo index
+  //////////////////////////////////////////////////////////////////////////////
+  static RocksDBKeyBounds LegacyGeoIndex(uint64_t indexId);
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief Bounds for all entries in geo index
   //////////////////////////////////////////////////////////////////////////////
   static RocksDBKeyBounds GeoIndex(uint64_t indexId);
-  static RocksDBKeyBounds GeoIndex(uint64_t indexId, bool isSlot);
+  static RocksDBKeyBounds GeoIndex(uint64_t indexId, uint64_t minCell, uint64_t maxCell);
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Bounds for all index-entries within a value range belonging to a
@@ -115,16 +127,14 @@ class RocksDBKeyBounds {
   /// @brief Bounds for all documents within a value range belonging to a
   /// specified unique index
   //////////////////////////////////////////////////////////////////////////////
-  static RocksDBKeyBounds UniqueVPackIndex(uint64_t indexId,
-                                           VPackSlice const& left,
+  static RocksDBKeyBounds UniqueVPackIndex(uint64_t indexId, VPackSlice const& left,
                                            VPackSlice const& right);
-  
+
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Bounds for all documents within a value range belonging to a
   /// specified unique index. this method is used for point lookups
   //////////////////////////////////////////////////////////////////////////////
-  static RocksDBKeyBounds UniqueVPackIndex(uint64_t indexId,
-                                           VPackSlice const& left);
+  static RocksDBKeyBounds UniqueVPackIndex(uint64_t indexId, VPackSlice const& left);
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Bounds for all views belonging to a specified database
@@ -149,14 +159,12 @@ class RocksDBKeyBounds {
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Bounds for all entries of a fulltext index, matching prefixes
   //////////////////////////////////////////////////////////////////////////////
-  static RocksDBKeyBounds FulltextIndexPrefix(uint64_t,
-                                              arangodb::StringRef const&);
+  static RocksDBKeyBounds FulltextIndexPrefix(uint64_t, arangodb::StringRef const&);
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Bounds for all entries of a fulltext index, matching the word
   //////////////////////////////////////////////////////////////////////////////
-  static RocksDBKeyBounds FulltextIndexComplete(uint64_t,
-                                                arangodb::StringRef const&);
+  static RocksDBKeyBounds FulltextIndexComplete(uint64_t, arangodb::StringRef const&);
 
  public:
   RocksDBKeyBounds(RocksDBKeyBounds const& other);
@@ -203,12 +211,13 @@ class RocksDBKeyBounds {
   RocksDBKeyBounds();
   explicit RocksDBKeyBounds(RocksDBEntryType type);
   RocksDBKeyBounds(RocksDBEntryType type, uint64_t first);
-  RocksDBKeyBounds(RocksDBEntryType type, uint64_t first,
-                   arangodb::StringRef const& second);
-  RocksDBKeyBounds(RocksDBEntryType type, uint64_t first,
-                   VPackSlice const& second);
+  RocksDBKeyBounds(RocksDBEntryType type, uint64_t first, arangodb::StringRef const& second);
+  RocksDBKeyBounds(RocksDBEntryType type, uint64_t first, VPackSlice const& second);
   RocksDBKeyBounds(RocksDBEntryType type, uint64_t first,
                    VPackSlice const& second, VPackSlice const& third);
+  RocksDBKeyBounds(RocksDBEntryType type, uint64_t first, uint64_t second, uint64_t third);
+  RocksDBKeyBounds(RocksDBEntryType type, uint64_t id, std::string const& lower,
+                   std::string const& upper);
 
  private:
   // private class that will hold both bounds in a single buffer (with only one
@@ -220,8 +229,7 @@ class RocksDBKeyBounds {
     BoundsBuffer() : _separatorPosition(0) {}
 
     BoundsBuffer(BoundsBuffer const& other)
-        : _buffer(other._buffer),
-          _separatorPosition(other._separatorPosition) {}
+        : _buffer(other._buffer), _separatorPosition(other._separatorPosition) {}
 
     BoundsBuffer(BoundsBuffer&& other)
         : _buffer(std::move(other._buffer)),

@@ -95,9 +95,9 @@ bool mmap_handle::open(const file_path_t path) NOEXCEPT {
 
   fd_ = fd;
 
-  const auto size = irs::file_utils::file_size(fd);
+  uint64_t size;
 
-  if (size < 0) {
+  if (!irs::file_utils::byte_size(size, fd)) {
     IR_FRMT_ERROR("Failed to get stats for input file, error: %d, path: " IR_FILEPATH_SPECIFIER, errno, path);
     close();
     return false;
@@ -106,7 +106,7 @@ bool mmap_handle::open(const file_path_t path) NOEXCEPT {
   if (size) {
     size_ = size;
 
-    void* addr = mmap(0, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    void* addr = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
 
     if (MAP_FAILED == addr) {
       IR_FRMT_ERROR("Failed to mmap input file, error: %d, path: " IR_FILEPATH_SPECIFIER, errno, path);
@@ -122,3 +122,7 @@ bool mmap_handle::open(const file_path_t path) NOEXCEPT {
 
 NS_END // mmap_utils
 NS_END // ROOT
+
+// -----------------------------------------------------------------------------
+// --SECTION--                                                       END-OF-FILE
+// -----------------------------------------------------------------------------

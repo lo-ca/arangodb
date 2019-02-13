@@ -31,6 +31,7 @@
 #include "Indexes/IndexIterator.h"
 #include "MMFiles/MMFilesIndex.h"
 #include "MMFiles/MMFilesIndexElement.h"
+#include "MMFiles/MMFilesIndexLookupContext.h"
 #include "VocBase/voc-types.h"
 #include "VocBase/vocbase.h"
 
@@ -42,11 +43,12 @@ namespace basics {
 class LocalTaskQueue;
 }
 
+class ManagedDocumentResult;
 class MMFilesEdgeIndex;
 
 struct MMFilesEdgeIndexHelper {
   /// @brief hashes an edge key
-  static inline uint64_t HashKey(void*, VPackSlice const* key) {
+  static inline uint64_t HashKey(VPackSlice const* key) {
     TRI_ASSERT(key != nullptr);
     // we can get away with the fast hash function here, as edge
     // index values are restricted to strings
@@ -54,8 +56,7 @@ struct MMFilesEdgeIndexHelper {
   }
 
   /// @brief hashes an edge
-  static inline uint64_t HashElement(void*, MMFilesSimpleIndexElement const& element,
-                                     bool byKey) {
+  static inline uint64_t HashElement(MMFilesSimpleIndexElement const& element, bool byKey) {
     if (byKey) {
       return element.hash();
     }
@@ -68,7 +69,7 @@ struct MMFilesEdgeIndexHelper {
   inline bool IsEqualKeyElement(void* userData, VPackSlice const* left,
                                 MMFilesSimpleIndexElement const& right) const {
     TRI_ASSERT(left != nullptr);
-    IndexLookupContext* context = static_cast<IndexLookupContext*>(userData);
+    MMFilesIndexLookupContext* context = static_cast<MMFilesIndexLookupContext*>(userData);
     TRI_ASSERT(context != nullptr);
 
     try {
@@ -90,7 +91,7 @@ struct MMFilesEdgeIndexHelper {
   inline bool IsEqualElementElementByKey(void* userData,
                                          MMFilesSimpleIndexElement const& left,
                                          MMFilesSimpleIndexElement const& right) const {
-    IndexLookupContext* context = static_cast<IndexLookupContext*>(userData);
+    MMFilesIndexLookupContext* context = static_cast<MMFilesIndexLookupContext*>(userData);
     try {
       VPackSlice lSlice = left.slice(context);
       VPackSlice rSlice = right.slice(context);
@@ -105,49 +106,47 @@ struct MMFilesEdgeIndexHelper {
   }
 };
 
-typedef arangodb::basics::AssocMulti<arangodb::velocypack::Slice,
-                                     MMFilesSimpleIndexElement, uint32_t, false, MMFilesEdgeIndexHelper>
-    TRI_MMFilesEdgeIndexHash_t;
+typedef arangodb::basics::AssocMulti<arangodb::velocypack::Slice, MMFilesSimpleIndexElement, uint32_t, false, MMFilesEdgeIndexHelper> TRI_MMFilesEdgeIndexHash_t;
 
 class MMFilesEdgeIndexIterator final : public IndexIterator {
  public:
   MMFilesEdgeIndexIterator(LogicalCollection* collection,
-                           transaction::Methods* trx,
-                           ManagedDocumentResult* mmdr,
+                           transaction::Methods* trx, ManagedDocumentResult* mmdr,
                            arangodb::MMFilesEdgeIndex const* index,
                            TRI_MMFilesEdgeIndexHash_t const* indexImpl,
-                           std::unique_ptr<VPackBuilder>& keys);
+                           std::unique_ptr<VPackBuilder> keys);
 
   ~MMFilesEdgeIndexIterator();
 
   char const* typeName() const override { return "edge-index-iterator"; }
 
   bool next(LocalDocumentIdCallback const& cb, size_t limit) override;
+  bool nextDocument(DocumentCallback const& cb, size_t limit) override;
 
   void reset() override;
 
  private:
   TRI_MMFilesEdgeIndexHash_t const* _index;
+  MMFilesIndexLookupContext _context;
   std::unique_ptr<arangodb::velocypack::Builder> _keys;
   arangodb::velocypack::ArrayIterator _iterator;
   std::vector<MMFilesSimpleIndexElement> _buffer;
   size_t _posInBuffer;
   size_t _batchSize;
   MMFilesSimpleIndexElement _lastElement;
+  std::vector<std::pair<LocalDocumentId, uint8_t const*>> _documentIds;
 };
 
 class MMFilesEdgeIndex final : public MMFilesIndex {
  public:
   MMFilesEdgeIndex() = delete;
 
-  MMFilesEdgeIndex(TRI_idx_iid_t, arangodb::LogicalCollection*);
+  MMFilesEdgeIndex(TRI_idx_iid_t iid, arangodb::LogicalCollection& collection);
 
  public:
   IndexType type() const override { return Index::TRI_IDX_TYPE_EDGE_INDEX; }
 
   char const* typeName() const override { return "edge"; }
-
-  bool allowExpansion() const override { return false; }
 
   bool canBeDropped() const override { return false; }
 
@@ -155,54 +154,47 @@ class MMFilesEdgeIndex final : public MMFilesIndex {
 
   bool hasSelectivityEstimate() const override { return true; }
 
-  double selectivityEstimateLocal(
-      arangodb::StringRef const* = nullptr) const override;
+  double selectivityEstimate(arangodb::StringRef const& = arangodb::StringRef()) const override;
 
   size_t memory() const override;
 
-  void toVelocyPack(VPackBuilder&, bool, bool) const override;
+  void toVelocyPack(VPackBuilder&, std::underlying_type<Index::Serialize>::type) const override;
 
   void toVelocyPackFigures(VPackBuilder&) const override;
 
-  Result insert(transaction::Methods*, LocalDocumentId const& documentId,
-             arangodb::velocypack::Slice const&, OperationMode mode) override;
+  void batchInsert(transaction::Methods& trx,
+                   std::vector<std::pair<LocalDocumentId, velocypack::Slice>> const& docs,
+                   std::shared_ptr<arangodb::basics::LocalTaskQueue> queue) override;
 
-  Result remove(transaction::Methods*, LocalDocumentId const& documentId,
-             arangodb::velocypack::Slice const&, OperationMode mode) override;
+  Result insert(transaction::Methods& trx, LocalDocumentId const& documentId,
+                velocypack::Slice const& doc, Index::OperationMode mode) override;
 
-  void batchInsert(transaction::Methods*,
-                   std::vector<std::pair<LocalDocumentId, VPackSlice>> const&,
-                   std::shared_ptr<arangodb::basics::LocalTaskQueue>) override;
+  Result remove(transaction::Methods& trx, LocalDocumentId const& documentId,
+                velocypack::Slice const& doc, Index::OperationMode mode) override;
 
   void load() override {}
   void unload() override;
 
-  int sizeHint(transaction::Methods*, size_t) override;
+  Result sizeHint(transaction::Methods& trx, size_t size) override;
 
   bool hasBatchInsert() const override { return true; }
 
-  TRI_MMFilesEdgeIndexHash_t* from() { return _edgesFrom.get(); }
+  TRI_MMFilesEdgeIndexHash_t* from() const { return _edgesFrom.get(); }
 
-  TRI_MMFilesEdgeIndexHash_t* to() { return _edgesTo.get(); }
+  TRI_MMFilesEdgeIndexHash_t* to() const { return _edgesTo.get(); }
 
-  bool supportsFilterCondition(arangodb::aql::AstNode const*,
+  bool supportsFilterCondition(std::vector<std::shared_ptr<arangodb::Index>> const& allIndexes,
+                               arangodb::aql::AstNode const*,
                                arangodb::aql::Variable const*, size_t, size_t&,
                                double&) const override;
 
-  IndexIterator* iteratorForCondition(transaction::Methods*,
-                                      ManagedDocumentResult*,
+  IndexIterator* iteratorForCondition(transaction::Methods*, ManagedDocumentResult*,
                                       arangodb::aql::AstNode const*,
                                       arangodb::aql::Variable const*,
-                                      bool) override;
+                                      IndexIteratorOptions const&) override;
 
-  arangodb::aql::AstNode* specializeCondition(
-      arangodb::aql::AstNode*, arangodb::aql::Variable const*) const override;
-
-  /// @brief Transform the list of search slices to search values.
-  ///        This will multiply all IN entries and simply return all other
-  ///        entries.
-  void expandInSearchValues(arangodb::velocypack::Slice const,
-                            arangodb::velocypack::Builder&) const override;
+  arangodb::aql::AstNode* specializeCondition(arangodb::aql::AstNode*,
+                                              arangodb::aql::Variable const*) const override;
 
  private:
   /// @brief create the iterator
@@ -215,13 +207,12 @@ class MMFilesEdgeIndex final : public MMFilesIndex {
                                   arangodb::aql::AstNode const*) const;
 
   /// @brief add a single value node to the iterator's keys
-  void handleValNode(VPackBuilder* keys,
-                     arangodb::aql::AstNode const* valNode) const;
+  void handleValNode(VPackBuilder* keys, arangodb::aql::AstNode const* valNode) const;
 
-  MMFilesSimpleIndexElement buildFromElement(
-      LocalDocumentId const& documentId, arangodb::velocypack::Slice const& doc) const;
-  MMFilesSimpleIndexElement buildToElement(
-      LocalDocumentId const& documentId, arangodb::velocypack::Slice const& doc) const;
+  MMFilesSimpleIndexElement buildFromElement(LocalDocumentId const& documentId,
+                                             arangodb::velocypack::Slice const& doc) const;
+  MMFilesSimpleIndexElement buildToElement(LocalDocumentId const& documentId,
+                                           arangodb::velocypack::Slice const& doc) const;
 
  private:
   /// @brief the hash table for _from
@@ -230,6 +221,6 @@ class MMFilesEdgeIndex final : public MMFilesIndex {
   /// @brief the hash table for _to
   std::unique_ptr<TRI_MMFilesEdgeIndexHash_t> _edgesTo;
 };
-}
+}  // namespace arangodb
 
 #endif

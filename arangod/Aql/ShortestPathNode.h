@@ -36,7 +36,7 @@ class Builder;
 namespace graph {
 struct BaseOptions;
 struct ShortestPathOptions;
-}
+}  // namespace graph
 namespace aql {
 
 /// @brief class ShortestPathNode
@@ -48,44 +48,40 @@ class ShortestPathNode : public GraphNode {
   /// @brief constructor with a vocbase and a collection name
  public:
   ShortestPathNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
-                AstNode const* direction, AstNode const* start, AstNode const* target,
-                AstNode const* graph, std::unique_ptr<graph::BaseOptions>& options);
+                   AstNode const* direction, AstNode const* start, AstNode const* target,
+                   AstNode const* graph, std::unique_ptr<graph::BaseOptions> options);
 
   ShortestPathNode(ExecutionPlan* plan, arangodb::velocypack::Slice const& base);
 
   ~ShortestPathNode();
 
   /// @brief Internal constructor to clone the node.
- private:
   ShortestPathNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
                    std::vector<std::unique_ptr<Collection>> const& edgeColls,
                    std::vector<std::unique_ptr<Collection>> const& vertexColls,
                    std::vector<TRI_edge_direction_e> const& directions,
-                   Variable const* inStartVariable,
-                   std::string const& startVertexId,
-                   Variable const* inTargetVariable,
-                   std::string const& targetVertexId,
-                   std::unique_ptr<graph::BaseOptions>& options);
+                   Variable const* inStartVariable, std::string const& startVertexId,
+                   Variable const* inTargetVariable, std::string const& targetVertexId,
+                   std::unique_ptr<graph::BaseOptions> options);
 
  public:
   /// @brief return the type of the node
   NodeType getType() const override final { return SHORTEST_PATH; }
 
   /// @brief export to VelocyPack
-  void toVelocyPackHelper(arangodb::velocypack::Builder&,
-                          bool) const override final;
+  void toVelocyPackHelper(arangodb::velocypack::Builder&, unsigned flags) const override final;
+
+  /// @brief creates corresponding ExecutionBlock
+  std::unique_ptr<ExecutionBlock> createBlock(
+      ExecutionEngine& engine,
+      std::unordered_map<ExecutionNode*, ExecutionBlock*> const&) const override;
 
   /// @brief clone ExecutionNode recursively
   ExecutionNode* clone(ExecutionPlan* plan, bool withDependencies,
                        bool withProperties) const override final;
 
-  /// @brief the cost of a traversal node
-  double estimateCost(size_t&) const override final;
-
   /// @brief Test if this node uses an in variable or constant for start
-  bool usesStartInVariable() const {
-    return _inStartVariable != nullptr;
-  }
+  bool usesStartInVariable() const { return _inStartVariable != nullptr; }
 
   /// @brief return the start variable
   Variable const* startInVariable() const { return _inStartVariable; }
@@ -93,9 +89,7 @@ class ShortestPathNode : public GraphNode {
   std::string const getStartVertex() const { return _startVertexId; }
 
   /// @brief Test if this node uses an in variable or constant for target
-  bool usesTargetInVariable() const {
-    return _inTargetVariable != nullptr;
-  }
+  bool usesTargetInVariable() const { return _inTargetVariable != nullptr; }
 
   /// @brief return the target variable
   Variable const* targetInVariable() const { return _inTargetVariable; }
@@ -114,21 +108,8 @@ class ShortestPathNode : public GraphNode {
     return vars;
   }
 
-  /// @brief getVariablesUsedHere, returning a vector
-  std::vector<Variable const*> getVariablesUsedHere() const override {
-    std::vector<Variable const*> vars;
-    if (_inStartVariable != nullptr) {
-      vars.emplace_back(_inStartVariable);
-    }
-    if (_inTargetVariable != nullptr) {
-      vars.emplace_back(_inTargetVariable);
-    }
-    return vars;
-  }
-
   /// @brief getVariablesUsedHere, modifying the set in-place
-  void getVariablesUsedHere(
-      std::unordered_set<Variable const*>& vars) const override {
+  void getVariablesUsedHere(arangodb::HashSet<Variable const*>& vars) const override {
     if (_inStartVariable != nullptr) {
       vars.emplace(_inStartVariable);
     }
@@ -143,7 +124,6 @@ class ShortestPathNode : public GraphNode {
   void prepareOptions() override;
 
  private:
-
   /// @brief input variable only used if _vertexId is unused
   Variable const* _inStartVariable;
 
@@ -156,14 +136,14 @@ class ShortestPathNode : public GraphNode {
   /// @brief input vertexId only used if _inVariable is unused
   std::string _targetVertexId;
 
- /// @brief The hard coded condition on _from
+  /// @brief The hard coded condition on _from
   AstNode* _fromCondition;
 
   /// @brief The hard coded condition on _to
   AstNode* _toCondition;
 };
 
-} // namespace arangodb::aql
-} // namespace arangodb
+}  // namespace aql
+}  // namespace arangodb
 
 #endif

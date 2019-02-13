@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2014-2016 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2014-2018 ArangoDB GmbH, Cologne, Germany
 /// Copyright 2004-2014 triAGENS GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,13 +27,12 @@ using namespace arangodb::consensus;
 using namespace arangodb::velocypack;
 
 StoreCallback::StoreCallback(std::string const& path, std::string const& body)
-  : _path(path) , _body(body) {}
+    : _path(path), _body(body) {}
 
 bool StoreCallback::operator()(arangodb::ClusterCommResult* res) {
   if (res->status != CL_COMM_SENT) {
-    LOG_TOPIC(DEBUG, Logger::AGENCY)
-      << res->endpoint + _path << "(" << res->status << ", " << res->errorMessage
-      << "): " << _body;
+    LOG_TOPIC(DEBUG, Logger::AGENCY) << res->endpoint + _path << "(" << res->status
+                                     << ", " << res->errorMessage << "): " << _body;
   }
   return true;
 }

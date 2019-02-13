@@ -62,7 +62,8 @@ Note that in the *UPDATE* case it is possible to refer to the previous version o
 document using the *OLD* pseudo-value.
 
 
-### Setting query options
+Setting query options
+---------------------
 
 As in several above examples, the *ignoreErrors* option can be used to suppress query 
 errors that may occur when trying to violate unique key constraints.
@@ -81,8 +82,42 @@ explicitly.
 To make sure data are durable when an update query returns, there is the *waitForSync* 
 query option.
 
+In order to not accidentially update documents that have been written and updated since 
+you last fetched them you can use the option *ignoreRevs* to either let ArangoDB compare 
+the `_rev` value and only succeed if they still match, or let ArangoDB ignore them (default):
 
-### Returning documents
+```
+FOR i IN 1..1000
+  UPSERT { _key: CONCAT('test', i)}
+    INSERT {foobar: false}
+    UPDATE {_rev: "1287623", foobar: true }
+  IN users OPTIONS { ignoreRevs: false }
+```
+
+*NOTE*: You need to add the `_rev` value in the updateExpression, it will not be used within 
+the searchExpression. Even worse, if you use an outdated `_rev` in the searchExpression
+UPSERT will trigger the INSERT path instead of the UPDATE path, because it has not found a document
+exactly matching the searchExpression.
+
+In contrast to the MMFiles engine, the RocksDB engine does not require collection-level
+locks. Different write operations on the same collection do not block each other, as
+long as there are no _write-write conficts_ on the same documents. From an application
+development perspective it can be desired to have exclusive write access on collections,
+to simplify the development. Note that writes do not block reads in RocksDB.
+Exclusive access can also speed up modification queries, because we avoid conflict checks.
+
+Use the *exclusive* option to achieve this effect on a per query basis:
+
+```js
+FOR i IN 1..1000
+  UPSERT { _key: CONCAT('test', i) }
+  INSERT { foobar: false }
+  UPDATE { foobar: true }
+  IN users OPTIONS { exclusive: true }
+```
+
+Returning documents
+-------------------
 
 `UPSERT` statements can optionally return data. To do so, they need to be followed
 by a `RETURN` statement (intermediate `LET` statements are allowed, too). These statements
@@ -104,4 +139,3 @@ INSERT { name: 'superuser', logins: 1, dateCreated: DATE_NOW() }
 UPDATE { logins: OLD.logins + 1 } IN users
 RETURN { doc: NEW, type: OLD ? 'update' : 'insert' }
 ```
-

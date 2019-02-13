@@ -34,16 +34,17 @@ class QueryRegistry;
 
 class RestSimpleQueryHandler : public RestCursorHandler {
  public:
-  RestSimpleQueryHandler(GeneralRequest*, GeneralResponse*,
-                         arangodb::aql::QueryRegistry*);
+  RestSimpleQueryHandler(GeneralRequest*, GeneralResponse*, arangodb::aql::QueryRegistry*);
 
  public:
   RestStatus execute() override final;
+  char const* name() const override final { return "RestSimpleQueryHandler"; }
 
  private:
-  void allDocuments();
-  void allDocumentKeys();
+  RestStatus allDocuments();
+  RestStatus allDocumentKeys();
+  RestStatus byExample();
 };
-}
+}  // namespace arangodb
 
 #endif

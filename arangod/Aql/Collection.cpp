@@ -26,11 +26,10 @@
 #include <velocypack/Iterator.h>
 #include <velocypack/velocypack-aliases.h>
 
+#include "Basics/Exceptions.h"
 #include "Basics/StaticStrings.h"
 #include "Basics/StringUtils.h"
-#include "Basics/Exceptions.h"
 #include "Cluster/ClusterInfo.h"
-#include "Cluster/ClusterMethods.h"
 #include "Cluster/ServerState.h"
 #include "Transaction/Methods.h"
 #include "VocBase/LogicalCollection.h"
@@ -40,44 +39,37 @@ using namespace arangodb;
 using namespace arangodb::aql;
 
 /// @brief create a collection wrapper
-Collection::Collection(std::string const& name, TRI_vocbase_t* vocbase,
-                       AccessMode::Type accessType)
-    : collection(nullptr),
-      currentShard(),
-      name(name),
-      vocbase(vocbase),
-      accessType(accessType),
-      isReadWrite(false) {
-  TRI_ASSERT(!name.empty());
-  TRI_ASSERT(vocbase != nullptr);
+Collection::Collection(std::string const& name, TRI_vocbase_t* vocbase, AccessMode::Type accessType)
+    : _collection(nullptr),
+      _vocbase(vocbase),
+      _name(name),
+      _accessType(accessType),
+      _isReadWrite(false) {
+  TRI_ASSERT(!_name.empty());
+  TRI_ASSERT(_vocbase != nullptr);
 }
 
-/// @brief destroy a collection wrapper
-Collection::~Collection() {}
-
+/// @brief upgrade the access type to exclusive
+void Collection::setExclusiveAccess() {
+  TRI_ASSERT(AccessMode::isWriteOrExclusive(_accessType));
+  _accessType = AccessMode::Type::EXCLUSIVE;
+}
 
 /// @brief get the collection id
-TRI_voc_cid_t Collection::cid() const {
-  return getCollection()->cid();
-}
-  
+TRI_voc_cid_t Collection::id() const { return getCollection()->id(); }
+
 /// @brief count the number of documents in the collection
 size_t Collection::count(transaction::Methods* trx) const {
-  if (numDocuments == UNINITIALIZED) {
-    OperationResult res = trx->count(name, true);
-    if (res.fail()) {
-      THROW_ARANGO_EXCEPTION(res.result);
-    }
-    numDocuments = res.slice().getInt();
+  // estimate for the number of documents in the collection. may be outdated...
+  OperationResult res = trx->count(_name, transaction::CountType::TryCache);
+  if (res.fail()) {
+    THROW_ARANGO_EXCEPTION(res.result);
   }
-
-  return static_cast<size_t>(numDocuments);
+  return static_cast<size_t>(res.slice().getUInt());
 }
 
 /// @brief returns the collection's plan id
-TRI_voc_cid_t Collection::getPlanId() const {
-  return getCollection()->cid();
-}
+TRI_voc_cid_t Collection::getPlanId() const { return getCollection()->id(); }
 
 std::unordered_set<std::string> Collection::responsibleServers() const {
   std::unordered_set<std::string> result;
@@ -116,9 +108,9 @@ std::shared_ptr<std::vector<std::string>> Collection::shardIds() const {
     auto names = coll->realNamesForRead();
     auto res = std::make_shared<std::vector<std::string>>();
     for (auto const& n : names) {
-      auto collectionInfo = clusterInfo->getCollection(vocbase->name(), n);
+      auto collectionInfo = clusterInfo->getCollection(_vocbase->name(), n);
       auto list = clusterInfo->getShardList(
-          arangodb::basics::StringUtils::itoa(collectionInfo->cid()));
+          arangodb::basics::StringUtils::itoa(collectionInfo->id()));
       for (auto const& x : *list) {
         res->push_back(x);
       }
@@ -126,12 +118,12 @@ std::shared_ptr<std::vector<std::string>> Collection::shardIds() const {
     return res;
   }
 
-  return clusterInfo->getShardList(
-      arangodb::basics::StringUtils::itoa(getPlanId()));
+  return clusterInfo->getShardList(arangodb::basics::StringUtils::itoa(getPlanId()));
 }
 
 /// @brief returns the filtered list of shard ids of a collection
-std::shared_ptr<std::vector<std::string>> Collection::shardIds(std::unordered_set<std::string> const& includedShards) const {
+std::shared_ptr<std::vector<std::string>> Collection::shardIds(
+    std::unordered_set<std::string> const& includedShards) const {
   // use the simple method first
   auto copy = shardIds();
 
@@ -174,27 +166,23 @@ bool Collection::usesDefaultSharding() const {
 }
 
 void Collection::setCollection(arangodb::LogicalCollection* coll) {
-  collection = coll;
+  _collection = coll;
 }
 
 /// @brief either use the set collection or get one from ClusterInfo:
 std::shared_ptr<LogicalCollection> Collection::getCollection() const {
-  if (collection == nullptr) {
+  if (_collection == nullptr) {
     TRI_ASSERT(ServerState::instance()->isRunningInCluster());
     auto clusterInfo = arangodb::ClusterInfo::instance();
-    return clusterInfo->getCollection(vocbase->name(), name);
+    return clusterInfo->getCollection(_vocbase->name(), _name);
   }
-  std::shared_ptr<LogicalCollection> dummy;   // intentionally empty
+  std::shared_ptr<LogicalCollection> dummy;  // intentionally empty
   // Use the aliasing constructor:
-  return std::shared_ptr<LogicalCollection>(dummy, collection);
+  return std::shared_ptr<LogicalCollection>(dummy, _collection);
 }
 
 /// @brief check smartness of the underlying collection
-bool Collection::isSmart() const {
-  return getCollection()->isSmart();
-}
+bool Collection::isSmart() const { return getCollection()->isSmart(); }
 
 /// @brief check if collection is a satellite collection
-bool Collection::isSatellite() const {
-  return getCollection()->isSatellite();
-}
+bool Collection::isSatellite() const { return getCollection()->isSatellite(); }

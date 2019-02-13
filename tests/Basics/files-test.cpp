@@ -65,7 +65,7 @@ struct CFilesSetup {
 
   ~CFilesSetup () {
     // let's be sure we delete the right stuff
-    assert(_directory.length() > 10);
+    TRI_ASSERT(_directory.length() > 10);
 
     TRI_RemoveDirectory(_directory.c_str());
   }
@@ -358,6 +358,59 @@ SECTION("tst_absolute_paths") {
   TRI_Free(path);
 #endif
 }
+
+SECTION("tst_normalize") {
+  std::string path;
+
+  path = "/foo/bar/baz";
+  FileUtils::normalizePath(path);
+#ifdef _WIN32
+  CHECK(std::string("\\foo\\bar\\baz") == path);
+#else
+  CHECK(std::string("/foo/bar/baz") == path);
+#endif
+
+  path = "\\foo\\bar\\baz";
+  FileUtils::normalizePath(path);
+#ifdef _WIN32
+  CHECK(std::string("\\foo\\bar\\baz") == path);
+#else
+  CHECK(std::string("\\foo\\bar\\baz") == path);
+#endif
+  
+  path = "/foo/bar\\baz";
+  FileUtils::normalizePath(path);
+#ifdef _WIN32
+  CHECK(std::string("\\foo\\bar\\baz") == path);
+#else
+  CHECK(std::string("/foo/bar\\baz") == path);
+#endif
+  
+  path = "/foo/bar/\\baz";
+  FileUtils::normalizePath(path);
+#ifdef _WIN32
+  CHECK(std::string("\\foo\\bar\\baz") == path);
+#else
+  CHECK(std::string("/foo/bar/\\baz") == path);
+#endif
+  
+  path = "//foo\\/bar/\\baz";
+  FileUtils::normalizePath(path);
+#ifdef _WIN32
+  CHECK(std::string("\\\\foo\\bar\\baz") == path);
+#else
+  CHECK(std::string("//foo\\/bar/\\baz") == path);
+#endif
+  
+  path = "\\\\foo\\/bar/\\baz";
+  FileUtils::normalizePath(path);
+#ifdef _WIN32
+  CHECK(std::string("\\\\foo\\bar\\baz") == path);
+#else
+  CHECK(std::string("\\\\foo\\/bar/\\baz") == path);
+#endif
+}
+
 }
 
 ////////////////////////////////////////////////////////////////////////////////

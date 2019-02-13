@@ -59,7 +59,30 @@ FOR u IN users
   REMOVE { _key: u._key } IN backup
 ```
 
-### Setting query options
+A single document can be removed as well, using a document key string or a
+document with `_key` attribute:
+
+```
+REMOVE 'john' IN users
+```
+
+```
+LET doc = DOCUMENT('users/john')
+REMOVE doc IN users
+```
+
+The restriction of a single remove operation per query and collection
+applies. The following query causes an *access after data-modification*
+error because of the third remove operation:
+
+```
+REMOVE 'john' IN users
+REMOVE 'john' IN backups // OK, different collection
+REMOVE 'mary' IN users   // Error, users collection again
+```
+
+Setting query options
+---------------------
 
 *options* can be used to suppress query errors that may occur when trying to
 remove non-existing documents. For example, the following query will fail if one
@@ -86,7 +109,34 @@ FOR i IN 1..1000
   REMOVE { _key: CONCAT('test', i) } IN users OPTIONS { waitForSync: true }
 ```
 
-### Returning the removed documents
+In order to not accidentially remove documents that have been updated since you last fetched
+them, you can use the option *ignoreRevs* to either let ArangoDB compare the `_rev` values and 
+only succeed if they still match, or let ArangoDB ignore them (default):
+
+```
+FOR i IN 1..1000
+  REMOVE { _key: CONCAT('test', i), _rev: "1287623" } IN users OPTIONS { ignoreRevs: false }
+```
+
+In contrast to the MMFiles engine, the RocksDB engine does not require collection-level
+locks. Different write operations on the same collection do not block each other, as
+long as there are no _write-write conficts_ on the same documents. From an application
+development perspective it can be desired to have exclusive write access on collections,
+to simplify the development. Note that writes do not block reads in RocksDB.
+Exclusive access can also speed up modification queries, because we avoid conflict checks.
+
+Use the *exclusive* option to achieve this  effect on a per query basis:
+
+```js
+    FOR doc IN collection
+      REPLACE doc._key 
+      WITH { replaced: true } 
+      OPTIONS { exclusive: true }
+```
+
+
+Returning the removed documents
+-------------------------------
 
 The removed documents can also be returned by the query. In this case, the `REMOVE` 
 statement must be followed by a `RETURN` statement (intermediate `LET` statements
@@ -106,4 +156,3 @@ FOR u IN users
   LET removed = OLD 
   RETURN removed._key
 ```
-

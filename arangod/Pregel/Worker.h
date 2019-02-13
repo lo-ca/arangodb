@@ -23,39 +23,42 @@
 #ifndef ARANGODB_PREGEL_WORKER_H
 #define ARANGODB_PREGEL_WORKER_H 1
 
-#include <atomic>
-#include <boost/date_time/posix_time/posix_time.hpp>
 #include "Basics/Common.h"
+
+#include <boost/date_time/posix_time/posix_time.hpp>
+
 #include "Basics/Mutex.h"
 #include "Basics/ReadWriteLock.h"
+#include "Basics/asio_ns.h"
 #include "Pregel/AggregatorHandler.h"
 #include "Pregel/Algorithm.h"
 #include "Pregel/Statistics.h"
 #include "Pregel/WorkerConfig.h"
 #include "Pregel/WorkerContext.h"
+#include "Scheduler/Scheduler.h"
 
 struct TRI_vocbase_t;
+
 namespace arangodb {
+
 class RestPregelHandler;
+
 namespace pregel {
 
 class IWorker {
  public:
-  virtual ~IWorker(){};
+  virtual ~IWorker() {}
   virtual void setupWorker() = 0;
-  virtual void prepareGlobalStep(VPackSlice const& data,
-                                 VPackBuilder& result) = 0;
-  virtual void startGlobalStep(
-      VPackSlice const& data) = 0;  // called by coordinator
-  virtual void cancelGlobalStep(
-      VPackSlice const& data) = 0;  // called by coordinator
+  virtual void prepareGlobalStep(VPackSlice const& data, VPackBuilder& result) = 0;
+  virtual void startGlobalStep(VPackSlice const& data) = 0;  // called by coordinator
+  virtual void cancelGlobalStep(VPackSlice const& data) = 0;  // called by coordinator
   virtual void receivedMessages(VPackSlice const& data) = 0;
   virtual void finalizeExecution(VPackSlice const& data,
                                  std::function<void(void)> callback) = 0;
   virtual void startRecovery(VPackSlice const& data) = 0;
   virtual void compensateStep(VPackSlice const& data) = 0;
   virtual void finalizeRecovery(VPackSlice const& data) = 0;
-  virtual void aqlResult(VPackBuilder*) const = 0;
+  virtual void aqlResult(VPackBuilder&) const = 0;
 };
 
 template <typename V, typename E>
@@ -131,40 +134,37 @@ class Worker : public IWorker {
   std::atomic<uint64_t> _nextGSSSendMessageCount;
   /// if the worker has started sendng messages to the next GSS
   std::atomic<bool> _requestedNextGSS;
-  std::unique_ptr<boost::asio::deadline_timer> _boost_timer;
+  Scheduler::WorkHandle _workHandle;
 
   void _initializeMessageCaches();
   void _initializeVertexContext(VertexContext<V, E, M>* ctx);
   void _startProcessing();
-  bool _processVertices(size_t threadId,
-                        RangeIterator<VertexEntry>& vertexIterator);
+  bool _processVertices(size_t threadId, RangeIterator<VertexEntry>& vertexIterator);
   void _finishedProcessing();
   void _continueAsync();
   void _callConductor(std::string const& path, VPackBuilder const& message);
-  void _callConductorWithResponse(std::string const& path,
-                                  VPackBuilder const& message,
+  void _callConductorWithResponse(std::string const& path, VPackBuilder const& message,
                                   std::function<void(VPackSlice slice)> handle);
 
  public:
-  Worker(TRI_vocbase_t* vocbase, Algorithm<V, E, M>* algorithm,
-         VPackSlice params);
+  Worker(TRI_vocbase_t& vocbase, Algorithm<V, E, M>* algorithm, VPackSlice params);
   ~Worker();
 
   // ====== called by rest handler =====
   void setupWorker() override;
-  void prepareGlobalStep(VPackSlice const& data,
-                         VPackBuilder& result) override;
+  void prepareGlobalStep(VPackSlice const& data, VPackBuilder& result) override;
   void startGlobalStep(VPackSlice const& data) override;
   void cancelGlobalStep(VPackSlice const& data) override;
   void receivedMessages(VPackSlice const& data) override;
-  void finalizeExecution(VPackSlice const& data,
-                         std::function<void(void)> callback) override;
+  void finalizeExecution(VPackSlice const& data, std::function<void(void)> callback) override;
   void startRecovery(VPackSlice const& data) override;
   void compensateStep(VPackSlice const& data) override;
   void finalizeRecovery(VPackSlice const& data) override;
 
-  void aqlResult(VPackBuilder*) const override;
+  void aqlResult(VPackBuilder&) const override;
 };
-}
-}
+
+}  // namespace pregel
+}  // namespace arangodb
+
 #endif

@@ -9,7 +9,7 @@
     divs: ['#readme', '#swagger', '#app-info', '#sideinformation', '#information', '#settings'],
     navs: ['#service-info', '#service-api', '#service-readme', '#service-settings'],
 
-    template: templateEngine.createTemplate('applicationDetailView.ejs'),
+    template: templateEngine.createTemplate('serviceDetailView.ejs'),
 
     remove: function () {
       this.$el.empty().off(); /* off to unbind the events */
@@ -113,12 +113,12 @@
     },
 
     replaceApp: function () {
-      var mount = this.model.get('mount');
-      window.foxxInstallView.upgrade(mount, function () {
-        window.App.applicationDetail(encodeURIComponent(mount));
-      });
-      $('.createModalDialog .arangoHeader').html('Replace Service');
-      $('#infoTab').click();
+      window.App.replaceApp = true;
+      window.App.replaceAppData = {
+        model: this.model,
+        mount: this.model.get('mount')
+      };
+      window.App.navigate('services/install', {trigger: true});
     },
 
     updateConfig: function () {
@@ -230,7 +230,7 @@
     runTests: function (event) {
       event.preventDefault();
       var warning = (
-      '<p><strong>WARNING:</strong> Running tests may result in destructive side-effects including data loss.' +
+        '<p><strong>WARNING:</strong> Running tests may result in destructive side-effects including data loss.' +
         ' Please make sure not to run tests on a production database.</p>'
       );
       if (this.model.isDevelopment()) {
@@ -275,7 +275,8 @@
             $(this.el).html(this.template.render({
               app: this.model,
               baseUrl: arangoHelper.databaseUrl('', db),
-              mode: mode
+              mode: mode,
+              installed: true
             }));
 
             // init ace
@@ -430,7 +431,6 @@
           cfg[key] = val && JSON.stringify(JSON.parse(val));
         } else {
           cfg[key] = val;
-          return;
         }
       });
       this.model.setConfiguration(cfg, function () {
@@ -458,7 +458,7 @@
         } else if (obj.type === 'json') {
           methodName = 'createBlobEntry';
           defaultValue = obj.default === undefined ? '' : JSON.stringify(obj.default);
-          currentValue = obj.current === undefined ? '' : obj.current;
+          currentValue = obj.current === undefined ? '' : JSON.stringify(obj.current);
           checks.push({
             rule: function (v) {
               return v && JSON.parse(v);
@@ -491,7 +491,6 @@
             msg: 'This field is required.'
           });
         }
-        console.log(name);
         return window.modalView[methodName](
           'app_config_' + CryptoJS.MD5(name).toString(),
           name,

@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2014-2016 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2014-2017 ArangoDB GmbH, Cologne, Germany
 /// Copyright 2004-2014 triAGENS GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,10 +26,11 @@
 //
 // typeName() returns a string descibing the type of the indexIterator
 //
-// The next() function of the IndexIterator expects a callback taking LocalDocumentIds
-// that are created from RevisionIds. In addition it expects a limit.
-// The iterator has to walk through the Index and call the callback with at most limit
-// many elements. On the next iteration it has to continue after the last returned Token.
+// The next() function of the IndexIterator expects a callback taking
+// LocalDocumentIds that are created from RevisionIds. In addition it expects a
+// limit. The iterator has to walk through the Index and call the callback with
+// at most limit many elements. On the next iteration it has to continue after
+// the last returned Token.
 //
 // reset() resets the iterator
 //
@@ -41,19 +42,17 @@
 //    virtual IndexIterator* iteratorForCondition(...)
 // So a there is a way to create an iterator for the index
 
-
 #ifndef ARANGOD_INDEXES_INDEX_ITERATOR_H
 #define ARANGOD_INDEXES_INDEX_ITERATOR_H 1
 
 #include "Basics/Common.h"
-#include "Indexes/IndexLookupContext.h"
 #include "VocBase/LocalDocumentId.h"
 #include "VocBase/vocbase.h"
 
 namespace arangodb {
 class Index;
 class LogicalCollection;
-class ManagedDocumentResult;
+
 namespace transaction {
 class Methods;
 }
@@ -63,20 +62,17 @@ class Methods;
 class IndexIterator {
  public:
   typedef std::function<void(LocalDocumentId const& token)> LocalDocumentIdCallback;
-  typedef std::function<void(LocalDocumentId const& token,
-                             velocypack::Slice extra)> DocumentCallback;
-  typedef std::function<void(LocalDocumentId const& token,
-                             velocypack::Slice extra)> ExtraCallback;
+  typedef std::function<void(LocalDocumentId const& token, velocypack::Slice doc)> DocumentCallback;
+  typedef std::function<void(LocalDocumentId const& token, velocypack::Slice extra)> ExtraCallback;
 
  public:
   IndexIterator(IndexIterator const&) = delete;
   IndexIterator& operator=(IndexIterator const&) = delete;
   IndexIterator() = delete;
 
-  IndexIterator(LogicalCollection*, transaction::Methods*, ManagedDocumentResult*, arangodb::Index const*);
-  IndexIterator(LogicalCollection*, transaction::Methods*, arangodb::Index const*);
+  IndexIterator(LogicalCollection*, transaction::Methods*);
 
-  virtual ~IndexIterator();
+  virtual ~IndexIterator() {}
 
   virtual char const* typeName() const = 0;
 
@@ -88,9 +84,20 @@ class IndexIterator {
     return false;
   }
 
+  /// @brief default implementation for whether or not an index iterator
+  /// provides the "nextCovering" method as a performance optimization
+  virtual bool hasCovering() const {
+    // The default index has no covering method information
+    return false;
+  }
+
   virtual bool next(LocalDocumentIdCallback const& callback, size_t limit) = 0;
   virtual bool nextDocument(DocumentCallback const& callback, size_t limit);
   virtual bool nextExtra(ExtraCallback const& callback, size_t limit);
+
+  // extract index attribute values directly from the index while index scanning
+  // must only be called if hasCovering()
+  virtual bool nextCovering(DocumentCallback const& callback, size_t limit);
 
   virtual void reset();
 
@@ -99,73 +106,97 @@ class IndexIterator {
  protected:
   LogicalCollection* _collection;
   transaction::Methods* _trx;
-  ManagedDocumentResult* _mmdr;
-  IndexLookupContext _context;
-  bool _responsible;
 };
 
 /// @brief Special iterator if the condition cannot have any result
 class EmptyIndexIterator final : public IndexIterator {
  public:
-  EmptyIndexIterator(LogicalCollection* collection, transaction::Methods* trx, arangodb::Index const* index) 
-      : IndexIterator(collection, trx, index) {}
+  EmptyIndexIterator(LogicalCollection* collection, transaction::Methods* trx)
+      : IndexIterator(collection, trx) {}
 
   ~EmptyIndexIterator() {}
 
   char const* typeName() const override { return "empty-index-iterator"; }
 
-  bool next(LocalDocumentIdCallback const&, size_t) override {
-    return false;
-  }
+  bool next(LocalDocumentIdCallback const&, size_t) override { return false; }
 
   void reset() override {}
 
-  void skip(uint64_t, uint64_t& skipped) override {
-    skipped = 0;
-  }
+  void skip(uint64_t, uint64_t& skipped) override { skipped = 0; }
 };
 
 /// @brief a wrapper class to iterate over several IndexIterators.
 ///        Each iterator is requested at the index itself.
 ///        This iterator does NOT check for uniqueness.
 ///        Will always start with the first iterator in the vector. Reverse them
-///        Outside if necessary.
+///        outside if necessary.
 class MultiIndexIterator final : public IndexIterator {
-
-  public:
-   MultiIndexIterator(LogicalCollection* collection, transaction::Methods* trx,
-                      ManagedDocumentResult* mmdr,
-                      arangodb::Index const* index,
-                      std::vector<IndexIterator*> const& iterators)
-     : IndexIterator(collection, trx, mmdr, index), _iterators(iterators), _currentIdx(0), _current(nullptr) {
-       if (!_iterators.empty()) {
-         _current = _iterators.at(0);
-       }
-     }
-
-    ~MultiIndexIterator () {
-      // Free all iterators
-      for (auto& it : _iterators) {
-        delete it;
+ public:
+  MultiIndexIterator(LogicalCollection* collection, transaction::Methods* trx,
+                     arangodb::Index const* index, std::vector<IndexIterator*> const& iterators)
+      : IndexIterator(collection, trx),
+        _iterators(iterators),
+        _currentIdx(0),
+        _current(nullptr),
+        _hasCovering(true) {
+    if (!_iterators.empty()) {
+      _current = _iterators[0];
+      for (auto const& it : _iterators) {
+        // covering index support only present if all index
+        // iterators in this MultiIndexIterator support it
+        _hasCovering &= it->hasCovering();
       }
+    } else {
+      // no iterators => no covering index support
+      _hasCovering = false;
     }
-    
-    char const* typeName() const override { return "multi-index-iterator"; }
+  }
 
-    /// @brief Get the next elements
-    ///        If one iterator is exhausted, the next one is used.
-    ///        If callback is called less than limit many times
-    ///        all iterators are exhausted
-    bool next(LocalDocumentIdCallback const& callback, size_t limit) override;
+  ~MultiIndexIterator() {
+    // Free all iterators
+    for (auto& it : _iterators) {
+      delete it;
+    }
+  }
 
-    /// @brief Reset the cursor
-    ///        This will reset ALL internal iterators and start all over again
-    void reset() override;
+  char const* typeName() const override { return "multi-index-iterator"; }
 
-  private:
-   std::vector<IndexIterator*> _iterators;
-   size_t _currentIdx;
-   IndexIterator* _current;
+  /// @brief Get the next elements
+  ///        If one iterator is exhausted, the next one is used.
+  ///        If callback is called less than limit many times
+  ///        all iterators are exhausted
+  bool next(LocalDocumentIdCallback const& callback, size_t limit) override;
+
+  bool nextCovering(DocumentCallback const& callback, size_t limit) override;
+
+  /// @brief Reset the cursor
+  ///        This will reset ALL internal iterators and start all over again
+  void reset() override;
+
+  /// @brief for whether or not the iterators provide the "nextCovering" method
+  /// as a performance optimization
+  bool hasCovering() const override { return _hasCovering; }
+
+ private:
+  std::vector<IndexIterator*> _iterators;
+  size_t _currentIdx;
+  IndexIterator* _current;
+  bool _hasCovering;
 };
-}
+
+/// Options for creating an index iterator
+struct IndexIteratorOptions {
+  /// @brief whether the index must sort it's results
+  bool sorted = true;
+  /// @brief the index sort order - this is the same order for all indexes
+  bool ascending = true;
+  /// @brief Whether FCalls will be evaluated entirely or just it's arguments
+  /// Used when creating the condition required to build an iterator
+  bool evaluateFCalls = true;
+  /// @brief Whether to eagerly scan the full range of a condition
+  bool fullRange = false;
+  /// @brief Limit used in a parent LIMIT node (if non-zero)
+  size_t limit = 0;
+};
+}  // namespace arangodb
 #endif

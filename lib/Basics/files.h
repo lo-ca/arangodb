@@ -91,8 +91,7 @@ int TRI_CreateRecursiveDirectory(char const* path, long& systemError,
 /// @brief creates a directory
 ////////////////////////////////////////////////////////////////////////////////
 
-int TRI_CreateDirectory(char const* path, long& systemError,
-                        std::string& systemErrorStr);
+int TRI_CreateDirectory(char const* path, long& systemError, std::string& systemErrorStr);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief removes an empty directory
@@ -141,8 +140,7 @@ std::vector<std::string> TRI_FullTreeDirectory(char const* path);
 /// @brief renames a file
 ////////////////////////////////////////////////////////////////////////////////
 
-int TRI_RenameFile(char const* old, char const* filename,
-                   long* systemError = nullptr,
+int TRI_RenameFile(char const* old, char const* filename, long* systemError = nullptr,
                    std::string* systemErrorStr = nullptr);
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -258,7 +256,7 @@ std::string TRI_LocateBinaryPath(char const* argv0);
 ///    /opt/usr/bin /usr/bin/ => /opt/
 ////////////////////////////////////////////////////////////////////////////////
 
-std::string TRI_GetInstallRoot(std::string const& binaryPath, char const *installBinaryPath);
+std::string TRI_GetInstallRoot(std::string const& binaryPath, char const* installBinaryPath);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief locates the home directory
@@ -301,8 +299,7 @@ int TRI_GetTempName(char const* directory, std::string& result, bool createFile,
 /// @brief copies a file from source to dest.
 ////////////////////////////////////////////////////////////////////////////////
 
-bool TRI_CopyFile(std::string const& src, std::string const& dst,
-                  std::string& error);
+bool TRI_CopyFile(std::string const& src, std::string const& dst, std::string& error);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief copies the file Attributes from source to dest.
@@ -322,7 +319,7 @@ bool TRI_CopySymlink(std::string const& srcItem, std::string const& dstItem,
 /// @brief locate the installation directory
 ////////////////////////////////////////////////////////////////////////////////
 
-std::string TRI_LocateInstallDirectory(char const* argv_0, const char* binaryPath);
+std::string TRI_LocateInstallDirectory(char const* argv0, const char* binaryPath);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief locate the configuration directory
@@ -350,7 +347,7 @@ int TRI_CreateDatafile(std::string const& filename, size_t maximalSize);
 /// @brief checks whether path is full qualified or relative
 ////////////////////////////////////////////////////////////////////////////////
 
-bool TRI_PathIsAbsolute(const std::string &path);
+bool TRI_PathIsAbsolute(std::string const& path);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief initialize the files subsystem
@@ -364,4 +361,9 @@ void TRI_InitializeFiles();
 
 void TRI_ShutdownFiles();
 
+////////////////////////////////////////////////////////////////////////////////
+/// @brief if which is found, value is overwriten, true returned.
+////////////////////////////////////////////////////////////////////////////////
+
+bool TRI_GETENV(char const* which, std::string& value);
 #endif

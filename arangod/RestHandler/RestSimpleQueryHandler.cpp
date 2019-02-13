@@ -23,23 +23,24 @@
 
 #include "RestSimpleQueryHandler.h"
 
-#include "Aql/Query.h"
 #include "Aql/QueryRegistry.h"
 #include "Basics/Exceptions.h"
 #include "Basics/MutexLocker.h"
-#include "Basics/ScopeGuard.h"
 #include "Basics/VelocyPackHelper.h"
 #include "Utils/Cursor.h"
 #include "Utils/CursorRepository.h"
-#include "Utils/CollectionNameResolver.h"
 #include "VocBase/LogicalCollection.h"
+
+#include <velocypack/Builder.h>
+#include <velocypack/Iterator.h>
+#include <velocypack/velocypack-aliases.h>
 
 using namespace arangodb;
 using namespace arangodb::rest;
 
-RestSimpleQueryHandler::RestSimpleQueryHandler(
-    GeneralRequest* request, GeneralResponse* response,
-    arangodb::aql::QueryRegistry* queryRegistry)
+RestSimpleQueryHandler::RestSimpleQueryHandler(GeneralRequest* request,
+                                               GeneralResponse* response,
+                                               arangodb::aql::QueryRegistry* queryRegistry)
     : RestCursorHandler(request, response, queryRegistry) {}
 
 RestStatus RestSimpleQueryHandler::execute() {
@@ -50,18 +51,17 @@ RestStatus RestSimpleQueryHandler::execute() {
   if (type == rest::RequestType::PUT) {
     if (prefix == RestVocbaseBaseHandler::SIMPLE_QUERY_ALL_PATH) {
       // all query
-      allDocuments();
-      return RestStatus::DONE;
-    }
-    if (prefix == RestVocbaseBaseHandler::SIMPLE_QUERY_ALL_KEYS_PATH) {
+      return allDocuments();
+    } else if (prefix == RestVocbaseBaseHandler::SIMPLE_QUERY_ALL_KEYS_PATH) {
       // all-keys query
-      allDocumentKeys();
-      return RestStatus::DONE;
+      return allDocumentKeys();
+    } else if (prefix == RestVocbaseBaseHandler::SIMPLE_QUERY_BY_EXAMPLE) {
+      // by-example query
+      return byExample();
     }
   }
 
-  generateError(rest::ResponseCode::METHOD_NOT_ALLOWED,
-                TRI_ERROR_HTTP_METHOD_NOT_ALLOWED);
+  generateError(rest::ResponseCode::METHOD_NOT_ALLOWED, TRI_ERROR_HTTP_METHOD_NOT_ALLOWED);
   return RestStatus::DONE;
 }
 
@@ -69,36 +69,31 @@ RestStatus RestSimpleQueryHandler::execute() {
 /// @brief was docuBlock JSA_put_api_simple_all
 ////////////////////////////////////////////////////////////////////////////////
 
-void RestSimpleQueryHandler::allDocuments() {
-  bool parseSuccess = true;
-  std::shared_ptr<VPackBuilder> parsedBody =
-      parseVelocyPackBody(parseSuccess);
-
+RestStatus RestSimpleQueryHandler::allDocuments() {
+  bool parseSuccess = false;
+  VPackSlice const body = this->parseVPackBody(parseSuccess);
   if (!parseSuccess) {
     // error message generated in parseVelocyPackBody
-    return;
+    return RestStatus::DONE;
   }
-  
+
   std::string collectionName;
-  VPackSlice body = parsedBody.get()->slice();
-  
   if (body.isObject() && body.hasKey("collection")) {
     VPackSlice const value = body.get("collection");
     if (value.isString()) {
       collectionName = value.copyString();
     }
-    collectionName = value.copyString();
   } else {
     collectionName = _request->value("collection");
   }
-  
+
   if (collectionName.empty()) {
     generateError(rest::ResponseCode::BAD, TRI_ERROR_TYPE_ERROR,
                   "expecting string for <collection>");
-    return;
+    return RestStatus::DONE;
   }
-      
-  auto const* col = _vocbase->lookupCollection(collectionName);
+
+  auto col = _vocbase.lookupCollection(collectionName);
 
   if (col != nullptr && collectionName != col->name()) {
     // user has probably passed in a numeric collection id.
@@ -139,58 +134,56 @@ void RestSimpleQueryHandler::allDocuments() {
   data.add("count", VPackValue(true));
 
   // pass on standard options
-  {
-    VPackSlice ttl = body.get("ttl");
-    if (!ttl.isNone()) {
-      data.add("ttl", ttl);
-    }
+  VPackSlice ttl = body.get("ttl");
+  if (!ttl.isNone()) {
+    data.add("ttl", ttl);
+  }
 
-    VPackSlice batchSize = body.get("batchSize");
-    if (!batchSize.isNone()) {
-      data.add("batchSize", batchSize);
-    }
+  VPackSlice batchSize = body.get("batchSize");
+  if (!batchSize.isNone()) {
+    data.add("batchSize", batchSize);
+  }
+
+  VPackSlice stream = body.get("stream");
+  if (stream.isBool()) {
+    VPackObjectBuilder obj(&data, "options");
+    obj->add("stream", stream);
   }
   data.close();
 
-  VPackSlice s = data.slice();
   // now run the actual query and handle the result
-  processQuery(s);
+  return registerQueryOrCursor(data.slice());
 }
 
 //////////////////////////////////////////////////////////////////////////////
 /// @brief return a cursor with all document keys from the collection
 //////////////////////////////////////////////////////////////////////////////
 
-void RestSimpleQueryHandler::allDocumentKeys() {
-  bool parseSuccess = true;
-  std::shared_ptr<VPackBuilder> parsedBody =
-      parseVelocyPackBody(parseSuccess);
-
+RestStatus RestSimpleQueryHandler::allDocumentKeys() {
+  bool parseSuccess = false;
+  VPackSlice const body = this->parseVPackBody(parseSuccess);
   if (!parseSuccess) {
-    // error message generated in parseVelocyPackBody
-    return;
+    // error message generated in parseVPackBody
+    return RestStatus::DONE;
   }
 
   std::string collectionName;
-  VPackSlice body = parsedBody.get()->slice();
-
   if (body.isObject() && body.hasKey("collection")) {
     VPackSlice const value = body.get("collection");
     if (value.isString()) {
       collectionName = value.copyString();
     }
-    collectionName = value.copyString();
   } else {
     collectionName = _request->value("collection");
   }
-      
+
   if (collectionName.empty()) {
     generateError(rest::ResponseCode::BAD, TRI_ERROR_TYPE_ERROR,
                   "expecting string for <collection>");
-    return;
+    return RestStatus::DONE;
   }
-  
-  auto const* col = _vocbase->lookupCollection(collectionName);
+
+  auto col = _vocbase.lookupCollection(collectionName);
 
   if (col != nullptr && collectionName != col->name()) {
     // user has probably passed in a numeric collection id.
@@ -200,7 +193,8 @@ void RestSimpleQueryHandler::allDocumentKeys() {
 
   std::string returnType;
   if (body.isObject() && body.hasKey("type")) {
-    returnType = arangodb::basics::VelocyPackHelper::getStringValue(body, "type", "");
+    returnType =
+        arangodb::basics::VelocyPackHelper::getStringValue(body, "type", "");
   } else {
     returnType = _request->value("type");
   }
@@ -211,8 +205,8 @@ void RestSimpleQueryHandler::allDocumentKeys() {
   } else if (returnType == "id") {
     aql.append("doc._id");
   } else {
-    aql.append(std::string("CONCAT('/_db/") + _vocbase->name() +
-                "/_api/document/', doc._id)");
+    aql.append(std::string("CONCAT('/_db/") + _vocbase.name() +
+               "/_api/document/', doc._id)");
   }
 
   VPackBuilder data;
@@ -223,10 +217,99 @@ void RestSimpleQueryHandler::allDocumentKeys() {
   data.openObject();  // bindVars
   data.add("@collection", VPackValue(collectionName));
   data.close();  // bindVars
-
   data.close();
 
-  VPackSlice s = data.slice();
-  // now run the actual query and handle the result
-  processQuery(s);
+  return registerQueryOrCursor(data.slice());
+}
+
+static void buildExampleQuery(VPackBuilder& result, std::string const& cname,
+                              VPackSlice const& doc, size_t skip, size_t limit) {
+  TRI_ASSERT(doc.isObject());
+  std::string query = "FOR doc IN @@collection";
+
+  result.add("bindVars", VPackValue(VPackValueType::Object));
+  result.add("@collection", VPackValue(cname));
+  size_t i = 0;
+  for (auto pair : VPackObjectIterator(doc, true)) {
+    std::string key =
+        basics::StringUtils::replace(pair.key.copyString(), "`", "");
+    key =
+        basics::StringUtils::join(basics::StringUtils::split(key, "."), "`.`");
+    std::string istr = std::to_string(i++);
+    query.append(" FILTER doc.`").append(key).append("` == @value").append(istr);
+    result.add(std::string("value") + istr, pair.value);
+  }
+  result.close();
+
+  if (limit > 0 || skip > 0) {
+    query.append(" LIMIT ")
+        .append(std::to_string(skip))
+        .append(", ")
+        .append(limit > 0 ? std::to_string(limit) : "null")
+        .append(" ");
+  }
+  query.append(" RETURN doc");
+
+  result.add("query", VPackValue(query));
+}
+
+//////////////////////////////////////////////////////////////////////////////
+/// @brief return a cursor with all documents matching the example
+//////////////////////////////////////////////////////////////////////////////
+
+RestStatus RestSimpleQueryHandler::byExample() {
+  bool parseSuccess = false;
+  VPackSlice const body = this->parseVPackBody(parseSuccess);
+  if (!parseSuccess) {
+    // error message generated in parseVPackBody
+    return RestStatus::DONE;
+  }
+
+  if (!body.isObject() || !body.hasKey("example") || !body.get("example").isObject()) {
+    generateError(ResponseCode::BAD, TRI_ERROR_BAD_PARAMETER);
+    return RestStatus::DONE;
+  }
+
+  // velocypack will throw an exception for negative numbers
+  size_t skip = basics::VelocyPackHelper::getNumericValue(body, "skip", 0);
+  size_t limit = basics::VelocyPackHelper::getNumericValue(body, "limit", 0);
+  size_t batchSize = basics::VelocyPackHelper::getNumericValue(body, "batchSize", 0);
+  VPackSlice example = body.get("example");
+
+  std::string cname;
+  if (body.hasKey("collection")) {
+    VPackSlice const value = body.get("collection");
+    if (value.isString()) {
+      cname = value.copyString();
+    }
+  } else {
+    cname = _request->value("collection");
+  }
+
+  if (cname.empty()) {
+    generateError(rest::ResponseCode::BAD, TRI_ERROR_TYPE_ERROR,
+                  "expecting string for <collection>");
+    return RestStatus::DONE;
+  }
+
+  auto col = _vocbase.lookupCollection(cname);
+
+  if (col != nullptr && cname != col->name()) {
+    // user has probably passed in a numeric collection id.
+    // translate it into a "real" collection name
+    cname = col->name();
+  }
+
+  VPackBuilder data;
+  data.openObject();
+  buildExampleQuery(data, cname, example, skip, limit);
+
+  if (batchSize > 0) {
+    data.add("batchSize", VPackValue(batchSize));
+  }
+
+  data.add("count", VPackSlice::trueSlice());
+  data.close();
+
+  return registerQueryOrCursor(data.slice());
 }

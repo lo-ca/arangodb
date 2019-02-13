@@ -46,7 +46,7 @@
       validateInput: function () {
         return [
           {
-            rule: Joi.string().regex(/^(\/(APP[^/]+|(?!APP)[a-zA-Z0-9_\-%]+))+$/i),
+            rule: Joi.string().regex(/(\/|^)APP(\/|$)/i, {invert: true}),
             msg: 'May not contain /APP'
           },
           {
@@ -106,7 +106,7 @@
         return [
           {
             rule: Joi.string().required().regex(/^[a-zA-Z\-_][a-zA-Z0-9\-_]*$/),
-            msg: "Can only contain a to z, A to Z, 0-9, '-' and '_'."
+            msg: "Can only contain a to z, A to Z, 0-9, '-' and '_'. Cannot start with a number."
           }
         ];
       }
@@ -130,7 +130,7 @@
         return [
           {
             rule: Joi.string().required().regex(/^[a-zA-Z0-9 .,;-]+$/),
-            msg: 'Has to be non empty.'
+            msg: "Can only contain a to z, A to Z, 0-9, '-', '.', ',' and ';'."
           }
         ];
       }

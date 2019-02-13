@@ -28,33 +28,29 @@
 #include "Shell/ClientFeature.h"
 #include "Shell/V8ShellFeature.h"
 
-using namespace arangodb;
 using namespace arangodb::basics;
 using namespace arangodb::options;
 
-ShellFeature::ShellFeature(
-    application_features::ApplicationServer* server, int* result)
+namespace arangodb {
+
+ShellFeature::ShellFeature(application_features::ApplicationServer& server, int* result)
     : ApplicationFeature(server, "Shell"),
       _jslint(),
       _result(result),
-      _runMode(RunMode::INTERACTIVE) {
+      _runMode(RunMode::INTERACTIVE),
+      _unitTestFilter("") {
   requiresElevatedPrivileges(false);
   setOptional(false);
-  startsAfter("Config");
-  startsAfter("Language");
-  startsAfter("Logger");
-  startsAfter("V8Shell");
+  startsAfter("V8ShellPhase");
 }
 
-void ShellFeature::collectOptions(
-    std::shared_ptr<options::ProgramOptions> options) {
+void ShellFeature::collectOptions(std::shared_ptr<options::ProgramOptions> options) {
   options->addOption("--jslint", "do not start as shell, run jslint instead",
                      new VectorParameter<StringParameter>(&_jslint));
 
   options->addSection("javascript", "Configure the Javascript engine");
 
-  options->addOption("--javascript.execute",
-                     "execute Javascript code from file",
+  options->addOption("--javascript.execute", "execute Javascript code from file",
                      new VectorParameter<StringParameter>(&_executeScripts));
 
   options->addOption("--javascript.execute-string",
@@ -68,10 +64,12 @@ void ShellFeature::collectOptions(
   options->addOption("--javascript.unit-tests",
                      "do not start as shell, run unit tests instead",
                      new VectorParameter<StringParameter>(&_unitTests));
+
+  options->addOption("--javascript.unit-test-filter",
+                     "filter testcases in suite", new StringParameter(&_unitTestFilter));
 }
 
-void ShellFeature::validateOptions(
-    std::shared_ptr<options::ProgramOptions> options) {
+void ShellFeature::validateOptions(std::shared_ptr<options::ProgramOptions> options) {
   _positionals = options->processingResult()._positionals;
 
   ClientFeature* client =
@@ -123,15 +121,18 @@ void ShellFeature::validateOptions(
   }
 
   if (1 < n) {
-    LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "you cannot specify more than one type ("
-             << "jslint, execute, execute-string, check-syntax, unit-tests)";
+    LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+        << "you cannot specify more than one type ("
+        << "jslint, execute, execute-string, check-syntax, unit-tests)";
   }
 }
 
 void ShellFeature::start() {
   *_result = EXIT_FAILURE;
 
-  V8ShellFeature* shell = application_features::ApplicationServer::getFeature<V8ShellFeature>("V8Shell");
+  V8ShellFeature* shell =
+      application_features::ApplicationServer::getFeature<V8ShellFeature>(
+          "V8Shell");
 
   bool ok = false;
 
@@ -154,7 +155,7 @@ void ShellFeature::start() {
         break;
 
       case RunMode::UNIT_TESTS:
-        ok = shell->runUnitTests(_unitTests, _positionals);
+        ok = shell->runUnitTests(_unitTests, _positionals, _unitTestFilter);
         break;
 
       case RunMode::JSLINT:
@@ -162,7 +163,7 @@ void ShellFeature::start() {
         break;
     }
   } catch (std::exception const& ex) {
-    LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "caught exception " << ex.what();
+    LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "caught exception: " << ex.what();
     ok = false;
   } catch (...) {
     LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "caught unknown exception";
@@ -171,3 +172,5 @@ void ShellFeature::start() {
 
   *_result = ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
+
+}  // namespace arangodb

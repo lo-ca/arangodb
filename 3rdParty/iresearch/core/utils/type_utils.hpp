@@ -26,7 +26,6 @@
 
 #include "shared.hpp"
 #include "std.hpp"
-#include <type_traits>
 
 NS_ROOT
 
@@ -150,6 +149,16 @@ template<typename T, typename... Types>
 CONSTEXPR bool in_list() NOEXCEPT {
   return template_traits_t<Types...>::template in_list<T>();
 }
+
+///////////////////////////////////////////////////////////////////////////////
+/// @returns if 'T' is 'std::shared_ptr<T>' provides the member constant value
+///          equal to 'true', or 'false' otherwise
+///////////////////////////////////////////////////////////////////////////////
+template<typename T>
+struct is_shared_ptr : std::false_type {};
+
+template<typename T>
+struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
 
 NS_END
 

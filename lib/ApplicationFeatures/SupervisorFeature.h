@@ -27,22 +27,20 @@
 #include "Basics/threads.h"
 
 namespace arangodb {
-class SupervisorFeature final
-    : public application_features::ApplicationFeature {
- public:
-  explicit SupervisorFeature(application_features::ApplicationServer* server);
 
+class SupervisorFeature final : public application_features::ApplicationFeature {
  public:
+  explicit SupervisorFeature(application_features::ApplicationServer& server);
+
   void collectOptions(std::shared_ptr<options::ProgramOptions>) override final;
   void validateOptions(std::shared_ptr<options::ProgramOptions>) override final;
   void daemonize() override final;
 
  private:
   bool _supervisor;
-
- private:
   TRI_pid_t _clientPid;
 };
-};
+
+}  // namespace arangodb
 
 #endif

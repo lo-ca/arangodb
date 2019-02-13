@@ -25,28 +25,27 @@
 #include "Aql/QueryCache.h"
 #include "Basics/Exceptions.h"
 #include "Logger/Logger.h"
-#include "RestServer/FeatureCacheFeature.h"
 #include "StorageEngine/EngineSelectorFeature.h"
 #include "StorageEngine/StorageEngine.h"
 #include "StorageEngine/TransactionCollection.h"
 #include "Transaction/Methods.h"
 #include "Transaction/Options.h"
 #include "Utils/ExecContext.h"
+#include "VocBase/LogicalCollection.h"
 #include "VocBase/ticks.h"
 
 using namespace arangodb;
 
 /// @brief transaction type
-TransactionState::TransactionState(TRI_vocbase_t* vocbase,
+TransactionState::TransactionState(TRI_vocbase_t& vocbase, TRI_voc_tid_t tid,
                                    transaction::Options const& options)
     : _vocbase(vocbase),
-      _id(0),
+      _id(tid),
       _type(AccessMode::Type::READ),
       _status(transaction::Status::CREATED),
       _arena(),
       _collections{_arena},  // assign arena to vector
       _serverRole(ServerState::instance()->getRole()),
-      _resolver(new CollectionNameResolver(vocbase)),
       _hints(),
       _nestingLevel(0),
       _options(options) {}
@@ -61,26 +60,11 @@ TransactionState::~TransactionState() {
   for (auto it = _collections.rbegin(); it != _collections.rend(); ++it) {
     delete (*it);
   }
-
-  delete _resolver;
-}
-
-std::vector<std::string> TransactionState::collectionNames() const {
-  std::vector<std::string> result;
-  result.reserve(_collections.size());
-
-  for (auto& trxCollection : _collections) {
-    if (trxCollection->collection() != nullptr) {
-      result.emplace_back(trxCollection->collectionName());
-    }
-  }
-
-  return result;
 }
 
 /// @brief return the collection from a transaction
-TransactionCollection* TransactionState::collection(
-    TRI_voc_cid_t cid, AccessMode::Type accessType) {
+TransactionCollection* TransactionState::collection(TRI_voc_cid_t cid,
+                                                    AccessMode::Type accessType) {
   TRI_ASSERT(_status == transaction::Status::CREATED ||
              _status == transaction::Status::RUNNING);
 
@@ -95,12 +79,25 @@ TransactionCollection* TransactionState::collection(
   return trxCollection;
 }
 
+TransactionState::Cookie* TransactionState::cookie(void const* key) noexcept {
+  auto itr = _cookies.find(key);
+
+  return itr == _cookies.end() ? nullptr : itr->second.get();
+}
+
+TransactionState::Cookie::ptr TransactionState::cookie(void const* key,
+                                                       TransactionState::Cookie::ptr&& cookie) {
+  _cookies[key].swap(cookie);
+
+  return std::move(cookie);
+}
+
 /// @brief add a collection to a transaction
-int TransactionState::addCollection(TRI_voc_cid_t cid,
+int TransactionState::addCollection(TRI_voc_cid_t cid, std::string const& cname,
                                     AccessMode::Type accessType,
                                     int nestingLevel, bool force) {
   LOG_TRX(this, nestingLevel) << "adding collection " << cid;
-  
+
   // upgrade transaction type if required
   if (nestingLevel == 0) {
     if (!force) {
@@ -121,12 +118,12 @@ int TransactionState::addCollection(TRI_voc_cid_t cid,
 
   if (trxCollection != nullptr) {
     static_assert(AccessMode::Type::NONE < AccessMode::Type::READ &&
-                  AccessMode::Type::READ < AccessMode::Type::WRITE &&
-                  AccessMode::Type::READ < AccessMode::Type::EXCLUSIVE,
+                      AccessMode::Type::READ < AccessMode::Type::WRITE &&
+                      AccessMode::Type::WRITE < AccessMode::Type::EXCLUSIVE,
                   "AccessMode::Type total order fail");
     // we may need to recheck permissions here
     if (trxCollection->accessType() < accessType) {
-      int res = checkCollectionPermission(cid, accessType);
+      int res = checkCollectionPermission(cid, cname, accessType);
       if (res != TRI_ERROR_NO_ERROR) {
         return res;
       }
@@ -146,19 +143,20 @@ int TransactionState::addCollection(TRI_voc_cid_t cid,
       (isRunning() && !_options.allowImplicitCollections)) {
     return TRI_ERROR_TRANSACTION_UNREGISTERED_COLLECTION;
   }
-  
+
   // now check the permissions
-  int res = checkCollectionPermission(cid, accessType);
+  int res = checkCollectionPermission(cid, cname, accessType);
   if (res != TRI_ERROR_NO_ERROR) {
     return res;
   }
-  
+
   // collection was not contained. now create and insert it
   TRI_ASSERT(trxCollection == nullptr);
 
   StorageEngine* engine = EngineSelectorFeature::ENGINE;
+
   trxCollection =
-      engine->createTransactionCollection(this, cid, accessType, nestingLevel);
+      engine->createTransactionCollection(*this, cid, accessType, nestingLevel).release();
 
   TRI_ASSERT(trxCollection != nullptr);
 
@@ -178,11 +176,14 @@ int TransactionState::addCollection(TRI_voc_cid_t cid,
 Result TransactionState::ensureCollections(int nestingLevel) {
   return useCollections(nestingLevel);
 }
-  
+
 /// @brief run a callback on all collections
-void TransactionState::allCollections(std::function<bool(TransactionCollection*)> const& cb) {
+void TransactionState::allCollections( // iterate
+    std::function<bool(TransactionCollection&)> const& cb // callback to invoke
+) {
   for (auto& trxCollection : _collections) {
-    if (!cb(trxCollection)) {
+    TRI_ASSERT(trxCollection); // ensured by addCollection(...)
+    if (!cb(*trxCollection)) {
       // abort early
       return;
     }
@@ -224,10 +225,19 @@ int TransactionState::lockCollections() {
 }
 
 /// @brief find a collection in the transaction's list of collections
-TransactionCollection* TransactionState::findCollection(
-    TRI_voc_cid_t cid) const {
-  size_t unused = 0;
-  return findCollection(cid, unused);
+TransactionCollection* TransactionState::findCollection(TRI_voc_cid_t cid) const {
+  for (auto* trxCollection : _collections) {
+    if (cid == trxCollection->id()) {
+      // found
+      return trxCollection;
+    }
+    if (cid < trxCollection->id()) {
+      // collection not found
+      break;
+    }
+  }
+
+  return nullptr;
 }
 
 /// @brief find a collection in the transaction's list of collections
@@ -238,22 +248,22 @@ TransactionCollection* TransactionState::findCollection(
 ///        defines where the collection should be inserted,
 ///        so whenever we want to insert the collection we
 ///        have to use this position for insert.
-TransactionCollection* TransactionState::findCollection(
-    TRI_voc_cid_t cid, size_t& position) const {
+TransactionCollection* TransactionState::findCollection(TRI_voc_cid_t cid,
+                                                        size_t& position) const {
   size_t const n = _collections.size();
   size_t i;
 
   for (i = 0; i < n; ++i) {
-    auto trxCollection = _collections.at(i);
-
-    if (cid < trxCollection->id()) {
-      // collection not found
-      break;
-    }
+    auto trxCollection = _collections[i];
 
     if (cid == trxCollection->id()) {
       // found
       return trxCollection;
+    }
+
+    if (cid < trxCollection->id()) {
+      // collection not found
+      break;
     }
     // next
   }
@@ -265,8 +275,7 @@ TransactionCollection* TransactionState::findCollection(
 }
 
 void TransactionState::setType(AccessMode::Type type) {
-  if (AccessMode::isWriteOrExclusive(type) &&
-      AccessMode::isWriteOrExclusive(_type)) {
+  if (AccessMode::isWriteOrExclusive(type) && AccessMode::isWriteOrExclusive(_type)) {
     // type already correct. do nothing
     return;
   }
@@ -284,38 +293,59 @@ void TransactionState::setType(AccessMode::Type type) {
   // all right
   _type = type;
 }
-   
-bool TransactionState::isExclusiveTransactionOnSingleCollection() const {
-  return ((numCollections() == 1) && (_collections[0]->accessType() == AccessMode::Type::EXCLUSIVE));
+
+bool TransactionState::isLockedShard(std::string const& shard) const {
+  auto it = _lockedShards.find(shard);
+  return it != _lockedShards.end();
 }
 
-int TransactionState::checkCollectionPermission(TRI_voc_cid_t cid,
+void TransactionState::setLockedShard(std::string const& shard) {
+  _lockedShards.emplace(shard);
+}
+
+void TransactionState::setLockedShards(std::unordered_set<std::string> const& lockedShards) {
+  // Explicitly copy!
+  _lockedShards = lockedShards;
+}
+
+bool TransactionState::isOnlyExclusiveTransaction() const {
+  if (!AccessMode::isWriteOrExclusive(_type)) {
+    return false;
+  }
+  for (TransactionCollection* coll : _collections) {
+    if (AccessMode::isWrite(coll->accessType())) {
+      return false;
+    }
+  }
+  return true;
+}
+
+int TransactionState::checkCollectionPermission(TRI_voc_cid_t cid, std::string const& cname,
                                                 AccessMode::Type accessType) const {
   ExecContext const* exec = ExecContext::CURRENT;
+
   // no need to check for superuser, cluster_sync tests break otherwise
   if (exec != nullptr && !exec->isSuperuser() && ExecContext::isAuthEnabled()) {
-    // server is in read-only mode
-    if (accessType > AccessMode::Type::READ && !ServerState::writeOpsEnabled()) {
-      LOG_TOPIC(WARN, Logger::TRANSACTIONS) << "server is in read-only mode";
-      return TRI_ERROR_ARANGO_READ_ONLY;
-    }
-    std::string const colName = _resolver->getCollectionNameCluster(cid);
-    
-    AuthLevel level = exec->collectionAuthLevel(_vocbase->name(), colName);
-    
-    if (level == AuthLevel::NONE) {
-      LOG_TOPIC(TRACE, Logger::AUTHORIZATION) << "User " << exec->user()
-      << " has collection AuthLevel::NONE";
+    auto level = exec->collectionAuthLevel(_vocbase.name(), cname);
+    TRI_ASSERT(level != auth::Level::UNDEFINED);  // not allowed here
+
+    if (level == auth::Level::NONE) {
+      LOG_TOPIC(TRACE, Logger::AUTHORIZATION)
+          << "User " << exec->user() << " has collection auth::Level::NONE";
+
       return TRI_ERROR_FORBIDDEN;
     }
+
     bool collectionWillWrite = AccessMode::isWriteOrExclusive(accessType);
-    if (level == AuthLevel::RO && collectionWillWrite) {
-      LOG_TOPIC(TRACE, Logger::AUTHORIZATION) << "User " << exec->user()
-      << " has no write right for collection " << colName;
+
+    if (level == auth::Level::RO && collectionWillWrite) {
+      LOG_TOPIC(TRACE, Logger::AUTHORIZATION)
+          << "User " << exec->user() << " has no write right for collection " << cname;
+
       return TRI_ERROR_ARANGO_READ_ONLY;
     }
   }
-  
+
   return TRI_ERROR_NO_ERROR;
 }
 
@@ -343,29 +373,34 @@ void TransactionState::clearQueryCache() {
 
   try {
     std::vector<std::string> collections;
+
     for (auto& trxCollection : _collections) {
-      if (trxCollection->hasOperations()) {
+      if (trxCollection // valid instance
+          && trxCollection->collection() // has a valid collection
+          && trxCollection->hasOperations() // may have been modified
+         ) {
         // we're only interested in collections that may have been modified
-        collections.emplace_back(trxCollection->collectionName());
+        collections.emplace_back(trxCollection->collection()->guid());
       }
     }
 
     if (!collections.empty()) {
-      arangodb::aql::QueryCache::instance()->invalidate(_vocbase, collections);
+      arangodb::aql::QueryCache::instance()->invalidate(&_vocbase, collections);
     }
   } catch (...) {
     // in case something goes wrong, we have to remove all queries from the
     // cache
-    arangodb::aql::QueryCache::instance()->invalidate(_vocbase);
+    arangodb::aql::QueryCache::instance()->invalidate(&_vocbase);
   }
 }
 
 /// @brief update the status of a transaction
 void TransactionState::updateStatus(transaction::Status status) {
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
-  if (_status != transaction::Status::CREATED && 
-      _status != transaction::Status::RUNNING) {
-    LOG_TOPIC(ERR, Logger::FIXME) << "trying to update transaction status with an invalid state. current: " << _status << ", future: " << status;
+  if (_status != transaction::Status::CREATED && _status != transaction::Status::RUNNING) {
+    LOG_TOPIC(ERR, Logger::FIXME) << "trying to update transaction status with "
+                                     "an invalid state. current: "
+                                  << _status << ", future: " << status;
   }
 #endif
 

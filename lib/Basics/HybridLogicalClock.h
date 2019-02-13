@@ -54,12 +54,10 @@ class HybridLogicalClock {
       uint64_t physical = getPhysicalTime();
       oldTimeStamp = _lastTimeStamp.load(std::memory_order_relaxed);
       uint64_t oldTime = extractTime(oldTimeStamp);
-      newTimeStamp =
-          (physical <= oldTime)
-              ? assembleTimeStamp(oldTime, extractCount(oldTimeStamp) + 1)
-              : assembleTimeStamp(physical, 0);
-    } while (!_lastTimeStamp.compare_exchange_weak(oldTimeStamp, newTimeStamp,
-                                                   std::memory_order_release,
+      newTimeStamp = (physical <= oldTime)
+                         ? assembleTimeStamp(oldTime, extractCount(oldTimeStamp) + 1)
+                         : assembleTimeStamp(physical, 0);
+    } while (!_lastTimeStamp.compare_exchange_weak(oldTimeStamp, newTimeStamp, std::memory_order_release,
                                                    std::memory_order_relaxed));
     return newTimeStamp;
   }
@@ -79,9 +77,8 @@ class HybridLogicalClock {
       if (newTime == oldTime) {
         if (newTime == recTime) {
           // all three identical
-          newCount = (std::max)(extractCount(oldTimeStamp),
-                                extractCount(receivedTimeStamp)) +
-                     1;
+          newCount =
+              (std::max)(extractCount(oldTimeStamp), extractCount(receivedTimeStamp)) + 1;
         } else {
           // this means recTime < newTime
           newCount = extractCount(oldTimeStamp) + 1;
@@ -95,12 +92,12 @@ class HybridLogicalClock {
         }
       }
       newTimeStamp = assembleTimeStamp(newTime, newCount);
-    } while (!_lastTimeStamp.compare_exchange_weak(oldTimeStamp, newTimeStamp,
-                                                   std::memory_order_release,
+    } while (!_lastTimeStamp.compare_exchange_weak(oldTimeStamp, newTimeStamp, std::memory_order_release,
                                                    std::memory_order_relaxed));
     return newTimeStamp;
   }
 
+  /// encodes the uint64_t timestamp into a new string
   static std::string encodeTimeStamp(uint64_t t) {
     std::string r(11, '\x00');
     size_t pos = 11;
@@ -111,8 +108,21 @@ class HybridLogicalClock {
     return r.substr(pos, 11 - pos);
   }
 
+  /// encodes the uint64_t timestamp into the provided result buffer
+  /// the result buffer must be at least 11 chars long
+  /// the length of the encoded value and the start position into
+  /// the result buffer are returned
+  static std::pair<size_t, size_t> encodeTimeStamp(uint64_t t, char* r) {
+    size_t pos = 11;
+    while (t > 0) {
+      r[--pos] = encodeTable[static_cast<uint8_t>(t & 0x3ful)];
+      t >>= 6;
+    }
+    return std::make_pair(pos, 11 - pos);
+  }
+
   static uint64_t decodeTimeStamp(std::string const& s) {
-    return decodeTimeStamp(s.c_str(), s.size());
+    return decodeTimeStamp(s.data(), s.size());
   }
 
   static uint64_t decodeTimeStamp(char const* p, size_t len) {
@@ -130,14 +140,14 @@ class HybridLogicalClock {
     }
     return r;
   }
-  
+
   // helper to get the physical time in milliseconds since the epoch:
   uint64_t getPhysicalTime() {
     auto now = _clock.now();
-    uint64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      now.time_since_epoch())
-                      .count() -
-                  _offset1970;
+    uint64_t ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch())
+            .count() -
+        _offset1970;
     return ms;
   }
 
@@ -157,7 +167,7 @@ class HybridLogicalClock {
 
   static signed char decodeTable[256];
 };
-}
-}
+}  // namespace basics
+}  // namespace arangodb
 
 #endif

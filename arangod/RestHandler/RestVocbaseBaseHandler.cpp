@@ -29,12 +29,13 @@
 #include "Basics/VelocyPackHelper.h"
 #include "Basics/conversions.h"
 #include "Basics/tri-strings.h"
-#include "Cluster/CollectionLockState.h"
 #include "Cluster/ServerState.h"
 #include "Meta/conversion.h"
+#include "Rest/CommonDefines.h"
 #include "Rest/HttpRequest.h"
 #include "Transaction/Methods.h"
 #include "Transaction/StandaloneContext.h"
+#include "Utils/SingleCollectionTransaction.h"
 
 #include <velocypack/Builder.h>
 #include <velocypack/Dumper.h>
@@ -73,6 +74,13 @@ std::string const RestVocbaseBaseHandler::BATCH_PATH = "/_api/batch";
 std::string const RestVocbaseBaseHandler::COLLECTION_PATH = "/_api/collection";
 
 ////////////////////////////////////////////////////////////////////////////////
+/// @brief control pregel path
+////////////////////////////////////////////////////////////////////////////////
+
+std::string const RestVocbaseBaseHandler::CONTROL_PREGEL_PATH =
+    "/_api/control_pregel";
+
+////////////////////////////////////////////////////////////////////////////////
 /// @brief cursor path
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -97,6 +105,12 @@ std::string const RestVocbaseBaseHandler::DOCUMENT_PATH = "/_api/document";
 std::string const RestVocbaseBaseHandler::EDGES_PATH = "/_api/edges";
 
 ////////////////////////////////////////////////////////////////////////////////
+/// @brief gharial graph api path
+////////////////////////////////////////////////////////////////////////////////
+
+std::string const RestVocbaseBaseHandler::GHARIAL_PATH = "/_api/gharial";
+
+////////////////////////////////////////////////////////////////////////////////
 /// @brief endpoint path
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -113,7 +127,6 @@ std::string const RestVocbaseBaseHandler::IMPORT_PATH = "/_api/import";
 ////////////////////////////////////////////////////////////////////////////////
 
 std::string const RestVocbaseBaseHandler::INDEX_PATH = "/_api/index";
-
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief replication path
@@ -136,6 +149,41 @@ std::string const RestVocbaseBaseHandler::SIMPLE_QUERY_ALL_PATH =
 std::string const RestVocbaseBaseHandler::SIMPLE_QUERY_ALL_KEYS_PATH =
     "/_api/simple/all-keys";
 
+//////////////////////////////////////////////////////////////////////////////
+/// @brief simple query by example path
+//////////////////////////////////////////////////////////////////////////////
+
+std::string const RestVocbaseBaseHandler::SIMPLE_QUERY_BY_EXAMPLE =
+    "/_api/simple/by-example";
+
+//////////////////////////////////////////////////////////////////////////////
+/// @brief simple query first example path
+//////////////////////////////////////////////////////////////////////////////
+
+std::string const RestVocbaseBaseHandler::SIMPLE_FIRST_EXAMPLE =
+    "/_api/simple/first-example";
+
+//////////////////////////////////////////////////////////////////////////////
+/// @brief simple query remove by example path
+//////////////////////////////////////////////////////////////////////////////
+
+std::string const RestVocbaseBaseHandler::SIMPLE_REMOVE_BY_EXAMPLE =
+    "/_api/simple/remove-by-example";
+
+//////////////////////////////////////////////////////////////////////////////
+/// @brief simple query replace by example path
+//////////////////////////////////////////////////////////////////////////////
+
+std::string const RestVocbaseBaseHandler::SIMPLE_REPLACE_BY_EXAMPLE =
+    "/_api/simple/replace-by-example";
+
+//////////////////////////////////////////////////////////////////////////////
+/// @brief simple query replace by example path
+//////////////////////////////////////////////////////////////////////////////
+
+std::string const RestVocbaseBaseHandler::SIMPLE_UPDATE_BY_EXAMPLE =
+    "/_api/simple/update-by-example";
+
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief document batch lookup path
 ////////////////////////////////////////////////////////////////////////////////
@@ -149,6 +197,12 @@ std::string const RestVocbaseBaseHandler::SIMPLE_LOOKUP_PATH =
 
 std::string const RestVocbaseBaseHandler::SIMPLE_REMOVE_PATH =
     "/_api/simple/remove-by-keys";
+
+////////////////////////////////////////////////////////////////////////////////
+/// @brief tasks path
+////////////////////////////////////////////////////////////////////////////////
+
+std::string const RestVocbaseBaseHandler::TASKS_PATH = "/_api/tasks";
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief upload path
@@ -173,12 +227,12 @@ std::string const RestVocbaseBaseHandler::VIEW_PATH = "/_api/view";
 std::string const RestVocbaseBaseHandler::INTERNAL_TRAVERSER_PATH =
     "/_internal/traverser";
 
-RestVocbaseBaseHandler::RestVocbaseBaseHandler(GeneralRequest* request,
-                                               GeneralResponse* response)
+RestVocbaseBaseHandler::RestVocbaseBaseHandler(GeneralRequest* request, GeneralResponse* response)
     : RestBaseHandler(request, response),
-      _context(static_cast<VocbaseContext*>(request->requestContext())),
-      _vocbase(_context->vocbase()),
-      _nolockHeaderSet(nullptr) {}
+      _context(*static_cast<VocbaseContext*>(request->requestContext())),
+      _vocbase(_context.vocbase()) {
+  TRI_ASSERT(request->requestContext());
+}
 
 RestVocbaseBaseHandler::~RestVocbaseBaseHandler() {}
 
@@ -187,11 +241,11 @@ RestVocbaseBaseHandler::~RestVocbaseBaseHandler() {}
 /// optionally url-encodes
 ////////////////////////////////////////////////////////////////////////////////
 
-std::string RestVocbaseBaseHandler::assembleDocumentId(
-    std::string const& collectionName, std::string const& key, bool urlEncode) {
+std::string RestVocbaseBaseHandler::assembleDocumentId(std::string const& collectionName,
+                                                       std::string const& key,
+                                                       bool urlEncode) {
   if (urlEncode) {
-    return collectionName + TRI_DOCUMENT_HANDLE_SEPARATOR_STR +
-           StringUtils::urlEncode(key);
+    return collectionName + TRI_DOCUMENT_HANDLE_SEPARATOR_STR + StringUtils::urlEncode(key);
   }
   return collectionName + TRI_DOCUMENT_HANDLE_SEPARATOR_STR + key;
 }
@@ -200,11 +254,34 @@ std::string RestVocbaseBaseHandler::assembleDocumentId(
 /// @brief Generate a result for successful save
 ////////////////////////////////////////////////////////////////////////////////
 
-void RestVocbaseBaseHandler::generateSaved(
-    arangodb::OperationResult const& result, std::string const& collectionName,
-    TRI_col_type_e type, VPackOptions const* options, bool isMultiple) {
-  if (result.wasSynchronous) {
-    resetResponse(rest::ResponseCode::CREATED);
+void RestVocbaseBaseHandler::generateSaved(arangodb::OperationResult const& result,
+                                           std::string const& collectionName,
+                                           TRI_col_type_e type,
+                                           VPackOptions const* options, bool isMultiple) {
+  generate20x(result, collectionName, type, options, isMultiple, rest::ResponseCode::CREATED);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+/// @brief Generate a result for successful delete
+////////////////////////////////////////////////////////////////////////////////
+
+void RestVocbaseBaseHandler::generateDeleted(arangodb::OperationResult const& result,
+                                             std::string const& collectionName,
+                                             TRI_col_type_e type,
+                                             VPackOptions const* options, bool isMultiple) {
+  generate20x(result, collectionName, type, options, isMultiple, rest::ResponseCode::OK);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+/// @brief generates a HTTP 20x response
+////////////////////////////////////////////////////////////////////////////////
+
+void RestVocbaseBaseHandler::generate20x(arangodb::OperationResult const& result,
+                                         std::string const& collectionName, TRI_col_type_e type,
+                                         VPackOptions const* options, bool isMultiple,
+                                         rest::ResponseCode waitForSyncResponseCode) {
+  if (result._options.waitForSync) {
+    resetResponse(waitForSyncResponseCode);
   } else {
     resetResponse(rest::ResponseCode::ACCEPTED);
   }
@@ -213,52 +290,26 @@ void RestVocbaseBaseHandler::generateSaved(
     VPackBuilder errorBuilder;
     errorBuilder.openObject();
     for (auto const& it : result.countErrorCodes) {
-      errorBuilder.add(basics::StringUtils::itoa(it.first),
-                       VPackValue(it.second));
+      errorBuilder.add(basics::StringUtils::itoa(it.first), VPackValue(it.second));
     }
     errorBuilder.close();
     _response->setHeaderNC(StaticStrings::ErrorCodes, errorBuilder.toJson());
   }
 
-  generate20x(result, collectionName, type, options);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief Generate a result for successful delete
-////////////////////////////////////////////////////////////////////////////////
-
-void RestVocbaseBaseHandler::generateDeleted(
-    arangodb::OperationResult const& result, std::string const& collectionName,
-    TRI_col_type_e type, VPackOptions const* options) {
-  if (result.wasSynchronous) {
-    resetResponse(rest::ResponseCode::OK);
-  } else {
-    resetResponse(rest::ResponseCode::ACCEPTED);
-  }
-  generate20x(result, collectionName, type, options);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-/// @brief generates a HTTP 20x response
-////////////////////////////////////////////////////////////////////////////////
-
-void RestVocbaseBaseHandler::generate20x(
-    arangodb::OperationResult const& result, std::string const& collectionName,
-    TRI_col_type_e type, VPackOptions const* options) {
   VPackSlice slice = result.slice();
   if (slice.isNone()) {
     // will happen if silent == true
-    slice = VelocyPackHelper::EmptyObjectValue();
+    slice = arangodb::velocypack::Slice::emptyObjectSlice();
   } else {
     TRI_ASSERT(slice.isObject() || slice.isArray());
     if (slice.isObject()) {
-      _response->setHeaderNC(
-          StaticStrings::Etag,
-          "\"" + slice.get(StaticStrings::RevString).copyString() + "\"");
+      _response->setHeaderNC(StaticStrings::Etag,
+                             "\"" + slice.get(StaticStrings::RevString).copyString() +
+                                 "\"");
       // pre 1.4 location headers withdrawn for >= 3.0
-      std::string escapedHandle(assembleDocumentId(
-          collectionName, slice.get(StaticStrings::KeyString).copyString(),
-          true));
+      std::string escapedHandle(
+          assembleDocumentId(collectionName,
+                             slice.get(StaticStrings::KeyString).copyString(), true));
       _response->setHeaderNC(StaticStrings::Location,
                              std::string("/_db/" + _request->databaseName() +
                                          DOCUMENT_PATH + "/" + escapedHandle));
@@ -290,8 +341,7 @@ void RestVocbaseBaseHandler::generateForbidden() {
 /// @brief generates precondition failed
 ////////////////////////////////////////////////////////////////////////////////
 
-void RestVocbaseBaseHandler::generatePreconditionFailed(
-    VPackSlice const& slice) {
+void RestVocbaseBaseHandler::generatePreconditionFailed(VPackSlice const& slice) {
   resetResponse(rest::ResponseCode::PRECONDITION_FAILED);
 
   if (slice.isObject()) {  // single document case
@@ -302,23 +352,22 @@ void RestVocbaseBaseHandler::generatePreconditionFailed(
   VPackBuilder builder;
   {
     VPackObjectBuilder guard(&builder);
-    builder.add("error", VPackValue(true));
-    builder.add("code", VPackValue(static_cast<int32_t>(
-                            rest::ResponseCode::PRECONDITION_FAILED)));
-    builder.add("errorNum", VPackValue(TRI_ERROR_ARANGO_CONFLICT));
-    builder.add("errorMessage", VPackValue("precondition failed"));
+    builder.add(StaticStrings::Error, VPackValue(true));
+    builder.add(StaticStrings::Code,
+                VPackValue(static_cast<int32_t>(rest::ResponseCode::PRECONDITION_FAILED)));
+    builder.add(StaticStrings::ErrorNum, VPackValue(TRI_ERROR_ARANGO_CONFLICT));
+    builder.add(StaticStrings::ErrorMessage, VPackValue("precondition failed"));
     if (slice.isObject()) {
       builder.add(StaticStrings::IdString, slice.get(StaticStrings::IdString));
-      builder.add(StaticStrings::KeyString,
-                  slice.get(StaticStrings::KeyString));
-      builder.add(StaticStrings::RevString,
-                  slice.get(StaticStrings::RevString));
+      builder.add(StaticStrings::KeyString, slice.get(StaticStrings::KeyString));
+      builder.add(StaticStrings::RevString, slice.get(StaticStrings::RevString));
     } else {
       builder.add("result", slice);
     }
   }
 
   auto ctx = transaction::StandaloneContext::Create(_vocbase);
+
   writeResult(builder.slice(), *(ctx->getVPackOptionsForDump()));
 }
 
@@ -326,9 +375,9 @@ void RestVocbaseBaseHandler::generatePreconditionFailed(
 /// @brief generates precondition failed
 ////////////////////////////////////////////////////////////////////////////////
 
-void RestVocbaseBaseHandler::generatePreconditionFailed(
-    std::string const& collectionName, std::string const& key,
-    TRI_voc_rid_t rev) {
+void RestVocbaseBaseHandler::generatePreconditionFailed(std::string const& collectionName,
+                                                        std::string const& key,
+                                                        TRI_voc_rid_t rev) {
   VPackBuilder builder;
   builder.openObject();
   builder.add(StaticStrings::IdString,
@@ -354,15 +403,14 @@ void RestVocbaseBaseHandler::generateNotModified(TRI_voc_rid_t rid) {
 /// @brief generates next entry from a result set
 ////////////////////////////////////////////////////////////////////////////////
 
-void RestVocbaseBaseHandler::generateDocument(VPackSlice const& input,
-                                              bool generateBody,
+void RestVocbaseBaseHandler::generateDocument(VPackSlice const& input, bool generateBody,
                                               VPackOptions const* options) {
   VPackSlice document = input.resolveExternal();
 
   std::string rev;
   if (document.isObject()) {
-    rev = VelocyPackHelper::getStringValue(document, StaticStrings::RevString,
-                                           "");
+    rev =
+        VelocyPackHelper::getStringValue(document, StaticStrings::RevString, "");
   }
 
   // and generate a response
@@ -387,13 +435,13 @@ void RestVocbaseBaseHandler::generateDocument(VPackSlice const& input,
 /// used by the others.
 ////////////////////////////////////////////////////////////////////////////////
 
-void RestVocbaseBaseHandler::generateTransactionError(
-    std::string const& collectionName, OperationResult const& result,
-    std::string const& key, TRI_voc_rid_t rev) {
-
+void RestVocbaseBaseHandler::generateTransactionError(std::string const& collectionName,
+                                                      OperationResult const& result,
+                                                      std::string const& key,
+                                                      TRI_voc_rid_t rev) {
   int code = result.errorNumber();
   switch (code) {
-    case TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND:
+    case TRI_ERROR_ARANGO_DATA_SOURCE_NOT_FOUND:
       if (collectionName.empty()) {
         // no collection name specified
         generateError(rest::ResponseCode::BAD, code,
@@ -422,8 +470,7 @@ void RestVocbaseBaseHandler::generateTransactionError(
       } else {
         // This case happens if we call this method directly with a dummy
         // OperationResult:
-        generatePreconditionFailed(collectionName, key.empty() ? "unknown" : key,
-                                   rev);
+        generatePreconditionFailed(collectionName, key.empty() ? "unknown" : key, rev);
       }
       return;
 
@@ -436,8 +483,7 @@ void RestVocbaseBaseHandler::generateTransactionError(
 /// @brief extracts the revision
 ////////////////////////////////////////////////////////////////////////////////
 
-TRI_voc_rid_t RestVocbaseBaseHandler::extractRevision(char const* header,
-                                                      bool& isValid) {
+TRI_voc_rid_t RestVocbaseBaseHandler::extractRevision(char const* header, bool& isValid) const {
   isValid = true;
   bool found;
   std::string const& etag = _request->header(header, found);
@@ -475,27 +521,11 @@ TRI_voc_rid_t RestVocbaseBaseHandler::extractRevision(char const* header,
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-/// @brief extracts a boolean parameter value
-////////////////////////////////////////////////////////////////////////////////
-
-bool RestVocbaseBaseHandler::extractBooleanParameter(std::string const& name,
-                                                     bool def) const {
-  bool found;
-  std::string const& value = _request->value(name, found);
-
-  if (found) {
-    return StringUtils::boolean(value);
-  }
-
-  return def;
-}
-
-////////////////////////////////////////////////////////////////////////////////
 /// @brief extracts a string parameter value
 ////////////////////////////////////////////////////////////////////////////////
 
-void RestVocbaseBaseHandler::extractStringParameter(
-    std::string const& name, std::string& ret) const {
+void RestVocbaseBaseHandler::extractStringParameter(std::string const& name,
+                                                    std::string& ret) const {
   bool found;
   std::string const& value = _request->value(name, found);
 
@@ -504,18 +534,53 @@ void RestVocbaseBaseHandler::extractStringParameter(
   }
 }
 
+std::unique_ptr<SingleCollectionTransaction> RestVocbaseBaseHandler::createTransaction(
+    std::string const& name, AccessMode::Type type) const {
+  auto ctx = transaction::StandaloneContext::Create(_vocbase);
+  auto trx = std::make_unique<SingleCollectionTransaction>(ctx, name, type);
+  if (_nolockHeaderSet != nullptr) {
+    for (auto const& it : *_nolockHeaderSet) {
+      trx->setLockedShard(it);
+    }
+  }
+  return trx;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief prepareExecute, to react to X-Arango-Nolock header
 ////////////////////////////////////////////////////////////////////////////////
 
-void RestVocbaseBaseHandler::prepareExecute() {
-  RestBaseHandler::prepareExecute();
+void RestVocbaseBaseHandler::prepareExecute(bool isContinue) {
+  RestBaseHandler::prepareExecute(isContinue);
+  pickupNoLockHeaders();
+}
 
-  bool found;
-  std::string const& shardId = _request->header("x-arango-nolock", found);
+////////////////////////////////////////////////////////////////////////////////
+/// @brief shutdownExecute, to react to X-Arango-Nolock header
+////////////////////////////////////////////////////////////////////////////////
 
-  if (found) {
-    _nolockHeaderSet = new std::unordered_set<std::string>();
+void RestVocbaseBaseHandler::shutdownExecute(bool isFinalized) noexcept {
+  clearNoLockHeaders();
+  RestBaseHandler::shutdownExecute(isFinalized);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+/// @brief picks up X-Arango-Nolock headers and stores them in a tls variable
+////////////////////////////////////////////////////////////////////////////////
+
+void RestVocbaseBaseHandler::pickupNoLockHeaders() {
+  if (ServerState::instance()->isDBServer()) {
+    // Only DBServer needs to react to them!
+    bool found;
+    std::string const& shardId = _request->header(StaticStrings::XArangoNoLock, found);
+
+    if (!found) {
+      return;
+    }
+
+    TRI_ASSERT(_nolockHeaderSet == nullptr);
+    _nolockHeaderSet = std::make_unique<std::unordered_set<std::string>>();
+
     // Split value at commas, if there are any, otherwise take full value:
     size_t pos = shardId.find(',');
     size_t oldpos = 0;
@@ -525,20 +590,9 @@ void RestVocbaseBaseHandler::prepareExecute() {
       pos = shardId.find(',', oldpos);
     }
     _nolockHeaderSet->emplace(shardId.substr(oldpos));
-    CollectionLockState::_noLockHeaders = _nolockHeaderSet;
   }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-/// @brief finalizeExecute, to react to X-Arango-Nolock header
-////////////////////////////////////////////////////////////////////////////////
-
-void RestVocbaseBaseHandler::finalizeExecute() {
-  if (_nolockHeaderSet != nullptr) {
-    CollectionLockState::_noLockHeaders = nullptr;
-    delete _nolockHeaderSet;
-    _nolockHeaderSet = nullptr;
-  }
-
-  RestBaseHandler::finalizeExecute();
+void RestVocbaseBaseHandler::clearNoLockHeaders() noexcept {
+  _nolockHeaderSet.reset();
 }

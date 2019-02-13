@@ -24,9 +24,9 @@
 #ifndef ARANGOD_AQL_NODE_FINDER_H
 #define ARANGOD_AQL_NODE_FINDER_H 1
 
-#include "Basics/Common.h"
 #include "Aql/ExecutionNode.h"
 #include "Aql/WalkerWorker.h"
+#include "Basics/Common.h"
 #include "Basics/SmallVector.h"
 
 namespace arangodb {
@@ -68,10 +68,11 @@ class EndNodeFinder final : public WalkerWorker<ExecutionNode> {
   }
 
   void leaveSubquery(ExecutionNode*, ExecutionNode*) override final {
+    TRI_ASSERT(!_found.empty());
     _found.pop_back();
   }
 };
-}
-}
+}  // namespace aql
+}  // namespace arangodb
 
 #endif

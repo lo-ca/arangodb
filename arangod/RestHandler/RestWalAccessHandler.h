@@ -36,7 +36,9 @@ class RestWalAccessHandler : public arangodb::RestVocbaseBaseHandler {
 
  public:
   char const* name() const override final { return "RestWalAccessHandler"; }
-  bool isDirect() const override { return false; }
+  RequestLane lane() const override final {
+    return RequestLane::SERVER_REPLICATION;
+  }
   RestStatus execute() override;
 
  private:
@@ -46,7 +48,9 @@ class RestWalAccessHandler : public arangodb::RestVocbaseBaseHandler {
   void handleCommandLastTick(WalAccess const* wal);
   void handleCommandTail(WalAccess const* wal);
   void handleCommandDetermineOpenTransactions(WalAccess const* wal);
+
+  void grantTemporaryRights();
 };
-}
+}  // namespace arangodb
 
 #endif

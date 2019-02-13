@@ -31,17 +31,16 @@ class ArangoGlobalContext {
   static ArangoGlobalContext* CONTEXT;
 
  public:
-  ArangoGlobalContext(int argc, char* argv[], char const* InstallDirectory);
+  ArangoGlobalContext(int argc, char* argv[], char const* installDirectory);
   ~ArangoGlobalContext();
 
  public:
   std::string binaryName() const { return _binaryName; }
   std::string runRoot() const { return _runRoot; }
   void createMiniDumpFilename();
-  void normalizePath(std::vector<std::string>& path, char const* whichPath,
-                     bool fatal);
+  void normalizePath(std::vector<std::string>& path, char const* whichPath, bool fatal);
   void normalizePath(std::string& path, char const* whichPath, bool fatal);
-  std::string const& getBinaryPath() const {return _binaryPath;}
+  std::string const& getBinaryPath() const { return _binaryPath; }
   int exit(int ret);
   void installHup();
   void installSegv();
@@ -53,10 +52,10 @@ class ArangoGlobalContext {
  private:
   std::string _binaryName;
   std::string _binaryPath;
-  std::string _runRoot;
+  std::string const _runRoot;
   int _ret;
   bool _useEventLog;
 };
-}
+}  // namespace arangodb
 
 #endif

@@ -6,6 +6,7 @@
   // We have to start the app only in production mode, not in test mode
   if (!window.hasOwnProperty('TEST_BUILD')) {
     $(document).ajaxSend(function (event, jqxhr, settings) {
+      jqxhr.setRequestHeader('X-Arango-Frontend', 'true');
       var currentJwt = window.arangoHelper.getCurrentJwt();
       if (currentJwt) {
         jqxhr.setRequestHeader('Authorization', 'bearer ' + currentJwt);
@@ -38,6 +39,14 @@
         !$(e.target).hasClass('toggle')) {
         if ($('#userInfo').is(':visible')) {
           $('.subBarDropdown').hide();
+        }
+      }
+    });
+
+    $('body').on('keyup', function (e) {
+      if (e.keyCode === 27) {
+        if (window.modalView) {
+          window.modalView.hide();
         }
       }
     });

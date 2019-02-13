@@ -34,9 +34,12 @@ struct MMFilesMarker;
 struct TRI_vocbase_t;
 
 namespace arangodb {
+
 struct CompactionContext;
 class LogicalCollection;
+
 namespace transaction {
+
 class Methods;
 }
 
@@ -58,11 +61,16 @@ class MMFilesCompactorThread final : public Thread {
     bool _failed;
 
     CompactionInitialContext(transaction::Methods* trx, LogicalCollection* collection)
-        : _trx(trx), _collection(collection), _targetSize(0), _fid(0), _keepDeletions(false), _failed(false) {}
+        : _trx(trx),
+          _collection(collection),
+          _targetSize(0),
+          _fid(0),
+          _keepDeletions(false),
+          _failed(false) {}
   };
 
  public:
-  explicit MMFilesCompactorThread(TRI_vocbase_t* vocbase);
+  explicit MMFilesCompactorThread(TRI_vocbase_t& vocbase);
   ~MMFilesCompactorThread();
 
   void signal();
@@ -70,16 +78,17 @@ class MMFilesCompactorThread final : public Thread {
   /// @brief callback to drop a datafile
   static void DropDatafileCallback(MMFilesDatafile* datafile, LogicalCollection* collection);
   /// @brief callback to rename a datafile
-  static void RenameDatafileCallback(MMFilesDatafile* datafile, MMFilesDatafile* compactor, LogicalCollection* collection);
+  static void RenameDatafileCallback(MMFilesDatafile* datafile, MMFilesDatafile* compactor,
+                                     LogicalCollection* collection);
 
  protected:
   void run() override;
 
  private:
   /// @brief calculate the target size for the compactor to be created
-  CompactionInitialContext getCompactionContext(
-    transaction::Methods* trx, LogicalCollection* collection,
-    std::vector<CompactionInfo> const& toCompact);
+  CompactionInitialContext getCompactionContext(transaction::Methods* trx,
+                                                LogicalCollection* collection,
+                                                std::vector<CompactionInfo> const& toCompact);
 
   /// @brief compact the specified datafiles
   void compactDatafiles(LogicalCollection* collection, std::vector<CompactionInfo> const&);
@@ -93,18 +102,16 @@ class MMFilesCompactorThread final : public Thread {
   int removeDatafile(LogicalCollection* collection, MMFilesDatafile* datafile);
 
   /// @brief determine the number of documents in the collection
-  uint64_t getNumberOfDocuments(LogicalCollection* collection);
+  uint64_t getNumberOfDocuments(LogicalCollection& collection);
 
   /// @brief write a copy of the marker into the datafile
   int copyMarker(MMFilesDatafile* compactor, MMFilesMarker const* marker,
                  MMFilesMarker** result);
 
- private:
-  TRI_vocbase_t* _vocbase;
-
+  TRI_vocbase_t& _vocbase;
   arangodb::basics::ConditionVariable _condition;
 };
 
-}
+}  // namespace arangodb
 
 #endif

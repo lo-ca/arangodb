@@ -24,7 +24,10 @@
 #include "Basics/Common.h"
 #include "Basics/directories.h"
 
+#include "ApplicationFeatures/BasicPhase.h"
+#include "ApplicationFeatures/CommunicationPhase.h"
 #include "ApplicationFeatures/ConfigFeature.h"
+#include "ApplicationFeatures/GreetingsPhase.h"
 #include "ApplicationFeatures/ShellColorsFeature.h"
 #include "ApplicationFeatures/ShutdownFeature.h"
 #include "ApplicationFeatures/TempFeature.h"
@@ -42,27 +45,30 @@ using namespace arangodb;
 using namespace arangodb::application_features;
 
 int main(int argc, char* argv[]) {
+  TRI_GET_ARGV(argc, argv);
   return ClientFeature::runMain(argc, argv, [&](int argc, char* argv[]) -> int {
     ArangoGlobalContext context(argc, argv, BIN_DIRECTORY);
     context.installHup();
 
-    std::shared_ptr<options::ProgramOptions> options(new options::ProgramOptions(
-        argv[0], "Usage: arangoexport [<options>]", "For more information use:", BIN_DIRECTORY));
-
+    std::shared_ptr<options::ProgramOptions> options(
+        new options::ProgramOptions(argv[0], "Usage: arangoexport [<options>]",
+                                    "For more information use:", BIN_DIRECTORY));
     ApplicationServer server(options, BIN_DIRECTORY);
-
     int ret;
 
-    server.addFeature(new ClientFeature(&server));
-    server.addFeature(new ConfigFeature(&server, "arangoexport"));
-    server.addFeature(new ExportFeature(&server, &ret));
-    server.addFeature(new LoggerFeature(&server, false));
-    server.addFeature(new RandomFeature(&server));
-    server.addFeature(new ShellColorsFeature(&server));
-    server.addFeature(new ShutdownFeature(&server, {"Export"}));
-    server.addFeature(new SslFeature(&server));
-    server.addFeature(new TempFeature(&server, "arangoexport"));
-    server.addFeature(new VersionFeature(&server));
+    server.addFeature(new application_features::BasicFeaturePhase(server, true));
+    server.addFeature(new application_features::CommunicationFeaturePhase(server));
+    server.addFeature(new application_features::GreetingsFeaturePhase(server, true));
+    server.addFeature(new ClientFeature(server, false));
+    server.addFeature(new ConfigFeature(server, "arangoexport"));
+    server.addFeature(new ExportFeature(server, &ret));
+    server.addFeature(new LoggerFeature(server, false));
+    server.addFeature(new RandomFeature(server));
+    server.addFeature(new ShellColorsFeature(server));
+    server.addFeature(new ShutdownFeature(server, {"Export"}));
+    server.addFeature(new SslFeature(server));
+    server.addFeature(new TempFeature(server, "arangoexport"));
+    server.addFeature(new VersionFeature(server));
 
     try {
       server.run(argc, argv);
@@ -71,15 +77,17 @@ int main(int argc, char* argv[]) {
         ret = EXIT_SUCCESS;
       }
     } catch (std::exception const& ex) {
-      LOG_TOPIC(ERR, Logger::STARTUP) << "arangoexport terminated because of an unhandled exception: "
-              << ex.what();
+      LOG_TOPIC(ERR, Logger::STARTUP)
+          << "arangoexport terminated because of an unhandled exception: "
+          << ex.what();
       ret = EXIT_FAILURE;
     } catch (...) {
-      LOG_TOPIC(ERR, Logger::STARTUP) << "arangoexport terminated because of an unhandled exception of "
-                  "unknown type";
+      LOG_TOPIC(ERR, Logger::STARTUP)
+          << "arangoexport terminated because of an unhandled exception of "
+             "unknown type";
       ret = EXIT_FAILURE;
     }
 
     return context.exit(ret);
-    });
+  });
 }

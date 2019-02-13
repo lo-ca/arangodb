@@ -31,7 +31,6 @@
 namespace arangodb {
 
 class LocalDocumentId;
-class ManagedDocumentResult;
 struct OperationCursor;
 class StringRef;
 class LogicalCollection;
@@ -48,36 +47,33 @@ namespace graph {
 struct BaseOptions;
 struct SingleServerEdgeDocumentToken;
 
-class SingleServerEdgeCursor : public EdgeCursor {
+class SingleServerEdgeCursor final : public EdgeCursor {
  private:
   BaseOptions* _opts;
   transaction::Methods* _trx;
-  ManagedDocumentResult* _mmdr;
   std::vector<std::vector<OperationCursor*>> _cursors;
   size_t _currentCursor;
   size_t _currentSubCursor;
   std::vector<LocalDocumentId> _cache;
   size_t _cachePos;
   std::vector<size_t> const* _internalCursorMapping;
-  using Callback = std::function<void(EdgeDocumentToken&&, arangodb::velocypack::Slice, size_t)>;
+  using Callback =
+      std::function<void(EdgeDocumentToken&&, arangodb::velocypack::Slice, size_t)>;
+
  public:
-  SingleServerEdgeCursor(ManagedDocumentResult* mmdr, BaseOptions* options,
-                         size_t, std::vector<size_t> const* mapping = nullptr);
+  SingleServerEdgeCursor(BaseOptions* options, size_t,
+                         std::vector<size_t> const* mapping = nullptr);
 
   ~SingleServerEdgeCursor();
 
-  bool next(std::function<void(EdgeDocumentToken&&,
-                               arangodb::velocypack::Slice, size_t)>
-                callback) override;
+  bool next(std::function<void(EdgeDocumentToken&&, arangodb::velocypack::Slice, size_t)> callback) override;
 
-  void readAll(
-      std::function<void(EdgeDocumentToken&&,
-                         arangodb::velocypack::Slice, size_t)>) override;
+  void readAll(std::function<void(EdgeDocumentToken&&, arangodb::velocypack::Slice, size_t)>) override;
 
   std::vector<std::vector<OperationCursor*>>& getCursors() { return _cursors; }
- 
+
  private:
-  //returns false if cursor can not be further advanced
+  // returns false if cursor can not be further advanced
   bool advanceCursor(OperationCursor*& cursor, std::vector<OperationCursor*>& cursorSet);
 
   void getDocAndRunCallback(OperationCursor*, Callback callback);

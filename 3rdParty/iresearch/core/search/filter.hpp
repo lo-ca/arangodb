@@ -87,13 +87,13 @@ class IRESEARCH_API filter {
   //////////////////////////////////////////////////////////////////////////////
   class IRESEARCH_API prepared: public util::attribute_store_provider {
    public:
-    DECLARE_SPTR(prepared);
-    DECLARE_FACTORY(prepared);
+    DECLARE_SHARED_PTR(const prepared);
+    DEFINE_FACTORY_INLINE(prepared)
 
     static prepared::ptr empty();
 
     prepared() = default;
-    explicit prepared(attribute_store&& attrs);
+    explicit prepared(attribute_store&& attrs) NOEXCEPT;
     virtual ~prepared();
 
     using util::attribute_store_provider::attributes;
@@ -125,26 +125,26 @@ class IRESEARCH_API filter {
     attribute_store attrs_;
   }; // prepared
 
-  DECLARE_PTR(filter);
-  DECLARE_FACTORY(filter);
+  DECLARE_UNIQUE_PTR(filter);
+  DEFINE_FACTORY_INLINE(filter)
 
   filter(const type_id& type) NOEXCEPT;
   virtual ~filter();
 
-  virtual size_t hash() const {
+  virtual size_t hash() const NOEXCEPT {
     return std::hash<const type_id*>()(type_);
   }
 
-  bool operator==(const filter& rhs) const {
-    return equals( rhs );
+  bool operator==(const filter& rhs) const NOEXCEPT {
+    return equals(rhs);
   }
 
-  bool operator!=( const filter& rhs ) const {
-    return !( *this == rhs );
+  bool operator!=(const filter& rhs) const NOEXCEPT {
+    return !(*this == rhs);
   }
 
   // boost::hash_combile support
-  friend size_t hash_value( const filter& q ) {
+  friend size_t hash_value(const filter& q) NOEXCEPT {
     return q.hash();
   }
 
@@ -180,17 +180,17 @@ class IRESEARCH_API filter {
     return prepare(rdr, order::prepared::unordered());
   }
 
-  boost_t boost() const { return boost_; }
+  boost_t boost() const NOEXCEPT { return boost_; }
 
-  filter& boost( boost_t boost ) {
+  filter& boost(boost_t boost) NOEXCEPT {
     boost_ = boost;
     return *this;
   }
 
-  const type_id& type() const { return *type_; }
+  const type_id& type() const NOEXCEPT { return *type_; }
 
  protected:
-  virtual bool equals( const filter& rhs ) const {
+  virtual bool equals(const filter& rhs) const NOEXCEPT {
     return type_ == rhs.type_;
   }
 
@@ -211,7 +211,7 @@ class IRESEARCH_API filter {
 class IRESEARCH_API empty: public filter {
  public:
   DECLARE_FILTER_TYPE();
-  DECLARE_FACTORY_DEFAULT();
+  DECLARE_FACTORY();
 
   empty();
 

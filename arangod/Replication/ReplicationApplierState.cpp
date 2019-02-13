@@ -29,12 +29,12 @@
 
 using namespace arangodb;
 
-ReplicationApplierState::ReplicationApplierState() 
+ReplicationApplierState::ReplicationApplierState()
     : _lastProcessedContinuousTick(0),
       _lastAppliedContinuousTick(0),
       _lastAvailableContinuousTick(0),
       _safeResumeTick(0),
-      _state(ActivityState::INACTIVE),
+      _phase(ActivityPhase::INACTIVE),
       _preventStart(false),
       _stopInitialSynchronization(false),
       _progressMsg(),
@@ -53,7 +53,7 @@ ReplicationApplierState::~ReplicationApplierState() {}
 ReplicationApplierState& ReplicationApplierState::operator=(ReplicationApplierState const& other) {
   reset(true);
 
-  _state = other._state;
+  _phase = other._phase;
   _lastAppliedContinuousTick = other._lastAppliedContinuousTick;
   _lastProcessedContinuousTick = other._lastProcessedContinuousTick;
   _lastAvailableContinuousTick = other._lastAvailableContinuousTick;
@@ -65,7 +65,7 @@ ReplicationApplierState& ReplicationApplierState::operator=(ReplicationApplierSt
   _lastError.code = other._lastError.code;
   _lastError.message = other._lastError.message;
   memcpy(&_lastError.time[0], &other._lastError.time[0], sizeof(_lastError.time));
-  
+
   _failedConnects = other._failedConnects;
   _totalRequests = other._totalRequests;
   _totalFailedConnects = other._totalFailedConnects;
@@ -87,42 +87,60 @@ void ReplicationApplierState::reset(bool resetState) {
   _progressTime[0] = '\0';
   _serverId = 0;
   _lastError.reset();
-      
+
   _failedConnects = 0;
   _totalRequests = 0;
   _totalFailedConnects = 0;
   _totalEvents = 0;
   _totalResyncs = 0;
   _skippedOperations = 0;
-  
+
   if (resetState) {
-    _state = ActivityState::INACTIVE;
+    _phase = ActivityPhase::INACTIVE;
   }
+}
+
+static std::string ActivityToString(ReplicationApplierState::ActivityPhase ph) {
+  switch (ph) {
+    case ReplicationApplierState::ActivityPhase::INACTIVE:
+      return "inactive";
+    case ReplicationApplierState::ActivityPhase::INITIAL:
+      return "initial";
+    case ReplicationApplierState::ActivityPhase::TAILING:
+      return "running";
+    case ReplicationApplierState::ActivityPhase::SHUTDOWN:
+      return "shutdown";
+  }
+  return "unknown";
 }
 
 void ReplicationApplierState::toVelocyPack(VPackBuilder& result, bool full) const {
   result.openObject();
 
   if (full) {
-    result.add("running", VPackValue(isRunning()));
+    result.add("running", VPackValue(isTailing()));  // isRunning
+    result.add("phase", VPackValue(ActivityToString(_phase)));
 
     // lastAppliedContinuousTick
     if (_lastAppliedContinuousTick > 0) {
-      result.add("lastAppliedContinuousTick", VPackValue(std::to_string(_lastAppliedContinuousTick)));
+      result.add("lastAppliedContinuousTick",
+                 VPackValue(std::to_string(_lastAppliedContinuousTick)));
     } else {
       result.add("lastAppliedContinuousTick", VPackValue(VPackValueType::Null));
     }
 
     // lastProcessedContinuousTick
     if (_lastProcessedContinuousTick > 0) {
-      result.add("lastProcessedContinuousTick", VPackValue(std::to_string(_lastProcessedContinuousTick)));
+      result.add("lastProcessedContinuousTick",
+                 VPackValue(std::to_string(_lastProcessedContinuousTick)));
     } else {
       result.add("lastProcessedContinuousTick", VPackValue(VPackValueType::Null));
     }
 
     // lastAvailableContinuousTick
     if (_lastAvailableContinuousTick > 0) {
-      result.add("lastAvailableContinuousTick", VPackValue(std::to_string(_lastAvailableContinuousTick)));
+      result.add("lastAvailableContinuousTick",
+                 VPackValue(std::to_string(_lastAvailableContinuousTick)));
     } else {
       result.add("lastAvailableContinuousTick", VPackValue(VPackValueType::Null));
     }
@@ -134,6 +152,13 @@ void ReplicationApplierState::toVelocyPack(VPackBuilder& result, bool full) cons
       result.add("safeResumeTick", VPackValue(VPackValueType::Null));
     }
 
+    if (isTailing()) {
+      TRI_voc_tick_t ticksBehind =
+          _lastAvailableContinuousTick -
+          std::max(_lastAppliedContinuousTick, _lastProcessedContinuousTick);
+      result.add("ticksBehind", VPackValue(ticksBehind));
+    }
+
     // progress
     result.add("progress", VPackValue(VPackValueType::Object));
     result.add("time", VPackValue(_progressTime));
@@ -141,7 +166,7 @@ void ReplicationApplierState::toVelocyPack(VPackBuilder& result, bool full) cons
       result.add("message", VPackValue(_progressMsg));
     }
     result.add("failedConnects", VPackValue(_failedConnects));
-    result.close(); // progress
+    result.close();  // progress
 
     result.add("totalRequests", VPackValue(_totalRequests));
     result.add("totalFailedConnects", VPackValue(_totalFailedConnects));
@@ -157,9 +182,11 @@ void ReplicationApplierState::toVelocyPack(VPackBuilder& result, bool full) cons
     TRI_GetTimeStampReplication(timeString, sizeof(timeString) - 1);
     result.add("time", VPackValue(&timeString[0]));
   } else {
-    result.add("serverId", VPackValue(std::to_string(_serverId))); 
-    result.add("lastProcessedContinuousTick", VPackValue(std::to_string(_lastProcessedContinuousTick))); 
-    result.add("lastAppliedContinuousTick", VPackValue(std::to_string(_lastAppliedContinuousTick))); 
+    result.add("serverId", VPackValue(std::to_string(_serverId)));
+    result.add("lastProcessedContinuousTick",
+               VPackValue(std::to_string(_lastProcessedContinuousTick)));
+    result.add("lastAppliedContinuousTick",
+               VPackValue(std::to_string(_lastAppliedContinuousTick)));
     result.add("safeResumeTick", VPackValue(std::to_string(_safeResumeTick)));
   }
 

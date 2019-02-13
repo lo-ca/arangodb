@@ -44,7 +44,7 @@
 /// @brief get the vocbase pointer from the current V8 context
 ////////////////////////////////////////////////////////////////////////////////
 
-TRI_vocbase_t* GetContextVocBase(v8::Isolate* isolate);
+TRI_vocbase_t& GetContextVocBase(v8::Isolate* isolate);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief parse document or document handle from a v8 value (string | object)
@@ -52,10 +52,8 @@ TRI_vocbase_t* GetContextVocBase(v8::Isolate* isolate);
 /// open afterwards.
 ////////////////////////////////////////////////////////////////////////////////
 
-bool ExtractDocumentHandle(v8::Isolate* isolate,
-                           v8::Handle<v8::Value> const val,
+bool ExtractDocumentHandle(v8::Isolate* isolate, v8::Handle<v8::Value> const val,
                            std::string& collectionName,
-                           arangodb::velocypack::Builder& builder,
-                           bool includeRev);
+                           arangodb::velocypack::Builder& builder, bool includeRev);
 
 #endif

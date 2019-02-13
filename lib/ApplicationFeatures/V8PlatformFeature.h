@@ -30,8 +30,8 @@
 #include <v8.h>
 
 namespace arangodb {
-class V8PlatformFeature final
-    : public application_features::ApplicationFeature {
+
+class V8PlatformFeature final : public application_features::ApplicationFeature {
  private:
   struct IsolateData {
     bool _outOfMemory = false;
@@ -55,14 +55,11 @@ class V8PlatformFeature final
     getIsolateData(isolate)->_outOfMemory = false;
   }
 
- public:
   static const uint32_t V8_INFO = 0;
   static const uint32_t V8_DATA_SLOT = 1;
 
- public:
-  explicit V8PlatformFeature(application_features::ApplicationServer* server);
+  explicit V8PlatformFeature(application_features::ApplicationServer& server);
 
- public:
   void collectOptions(std::shared_ptr<options::ProgramOptions>) override final;
   void validateOptions(std::shared_ptr<options::ProgramOptions>) override final;
   void start() override final;
@@ -80,10 +77,10 @@ class V8PlatformFeature final
   std::unique_ptr<v8::Platform> _platform;
   std::unique_ptr<v8::ArrayBuffer::Allocator> _allocator;
   std::string _v8CombinedOptions;
-  
-  arangodb::Mutex _lock; // to protect vector _isolateData
+  arangodb::Mutex _lock;  // to protect vector _isolateData
   std::unordered_map<v8::Isolate*, std::unique_ptr<IsolateData>> _isolateData;
 };
-}
+
+}  // namespace arangodb
 
 #endif

@@ -32,8 +32,7 @@ class LogAppenderStream : public LogAppender {
   LogAppenderStream(std::string const& filename, std::string const& filter, int fd);
   ~LogAppenderStream() {}
 
-  void logMessage(LogLevel, std::string const& message,
-                  size_t offset) override final;
+  void logMessage(LogLevel, std::string const& message, size_t offset) override final;
 
   virtual std::string details() override = 0;
 
@@ -42,13 +41,19 @@ class LogAppenderStream : public LogAppender {
  protected:
   void updateFd(int fd) { _fd = fd; }
 
+  // determine the required length of the output buffer for the log message
+  size_t determineOutputBufferSize(std::string const& message) const;
+
+  // write the log message into the already allocated output buffer
+  size_t writeIntoOutputBuffer(std::string const& message);
+
   virtual void writeLogMessage(LogLevel, char const*, size_t) = 0;
 
   /// @brief maximum size for reusable log buffer
   /// if the buffer exceeds this size, it will be freed after the log
   /// message was produced. otherwise it will be kept for recycling
-  static constexpr size_t maxBufferSize = 64 * 1024; 
-  
+  static constexpr size_t maxBufferSize = 64 * 1024;
+
  private:
   /// @brief a reusable buffer for log messages
   std::unique_ptr<char[]> _buffer;
@@ -57,11 +62,14 @@ class LogAppenderStream : public LogAppender {
   size_t _bufferSize;
 
  protected:
-  /// @brief file descriptor 
+  /// @brief file descriptor
   int _fd;
-  
+
   /// @brief whether or not we should use colors
   bool _useColors;
+
+  /// @brief whether or not to escape special chars in log output
+  bool const _escape;
 };
 
 class LogAppenderFile : public LogAppenderStream {
@@ -69,15 +77,19 @@ class LogAppenderFile : public LogAppenderStream {
   LogAppenderFile(std::string const& filename, std::string const& filter);
 
   void writeLogMessage(LogLevel, char const*, size_t) override final;
-  
+
   std::string details() override final;
- 
+
  public:
   static void reopenAll();
   static void closeAll();
-  static std::vector<std::tuple<int, std::string, LogAppenderFile*>> getFds() { return _fds; }
-  static void setFds(std::vector<std::tuple<int, std::string, LogAppenderFile*>> const& fds) { _fds = fds; }
-  static void clear(); 
+  static std::vector<std::tuple<int, std::string, LogAppenderFile*>> getFds() {
+    return _fds;
+  }
+  static void setFds(std::vector<std::tuple<int, std::string, LogAppenderFile*>> const& fds) {
+    _fds = fds;
+  }
+  static void clear();
 
  private:
   static std::vector<std::tuple<int, std::string, LogAppenderFile*>> _fds;
@@ -91,25 +103,26 @@ class LogAppenderStdStream : public LogAppenderStream {
   ~LogAppenderStdStream();
 
   std::string details() override final { return std::string(); }
-  
-  static void writeLogMessage(int fd, bool useColors, LogLevel, char const* p, size_t length, bool appendNewline);
+
+  static void writeLogMessage(int fd, bool useColors, LogLevel, char const* p,
+                              size_t length, bool appendNewline);
 
  private:
   void writeLogMessage(LogLevel, char const*, size_t) override final;
 };
 
-class LogAppenderStderr : public LogAppenderStdStream {
+class LogAppenderStderr final : public LogAppenderStdStream {
  public:
   explicit LogAppenderStderr(std::string const& filter)
       : LogAppenderStdStream("+", filter, STDERR_FILENO) {}
 };
 
-class LogAppenderStdout : public LogAppenderStdStream {
+class LogAppenderStdout final : public LogAppenderStdStream {
  public:
   explicit LogAppenderStdout(std::string const& filter)
       : LogAppenderStdStream("-", filter, STDOUT_FILENO) {}
 };
 
-}
+}  // namespace arangodb
 
 #endif

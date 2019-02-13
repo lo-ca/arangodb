@@ -24,9 +24,9 @@
 #ifndef ARANGOD_AQL_PARSER_H
 #define ARANGOD_AQL_PARSER_H 1
 
-#include "Basics/Common.h"
 #include "Aql/Ast.h"
 #include "Aql/Query.h"
+#include "Basics/Common.h"
 
 namespace arangodb {
 namespace aql {
@@ -52,7 +52,7 @@ class Parser {
 
   /// @brief return the scanner
   inline void* scanner() const { return _scanner; }
-  
+
   /// @brief a pointer to the start of the query string
   char const* queryStringStart() const { return _queryStringStart; }
 
@@ -75,11 +75,11 @@ class Parser {
 
   /// @brief adjust the current parse position
   inline void increaseOffset(size_t offset) { _offset += offset; }
-  
+
   inline void decreaseOffset(int offset) {
     _offset -= static_cast<size_t>(offset);
   }
-  
+
   /// @brief adjust the current parse position
   inline void decreaseOffset(size_t offset) { _offset -= offset; }
 
@@ -93,11 +93,11 @@ class Parser {
   /// @brief set data for write queries
   bool configureWriteQuery(AstNode const*, AstNode* optionNode);
 
-  /// @brief whether or not the query is a data-modification query
-  bool isModificationQuery() const { return _isModificationQuery; }
-
   /// @brief parse the query
-  QueryResult parse(bool);
+  void parse();
+
+  /// @brief parse the query and return parse details
+  QueryResult parseWithDetails();
 
   /// @brief register a parse error, position is specified as line / column
   void registerParseError(int, char const*, char const*, int, int);
@@ -110,6 +110,14 @@ class Parser {
 
   /// @brief register a warning
   void registerWarning(int, char const*, int, int);
+
+  /// @brief push an AstNode array element on top of the stack
+  /// the array must be removed from the stack via popArray
+  void pushArray(AstNode* array);
+
+  /// @brief pop an array value from the parser's stack
+  /// the array must have been added to the stack via pushArray
+  AstNode* popArray();
 
   /// @brief push an AstNode into the array element on top of the stack
   void pushArrayElement(AstNode*);
@@ -159,12 +167,9 @@ class Parser {
 
   /// @brief a stack of things, used temporarily during parsing
   std::vector<void*> _stack;
-
-  /// @brief whether or not the query is a modification query
-  bool _isModificationQuery;
 };
-}
-}
+}  // namespace aql
+}  // namespace arangodb
 
 /// @brief forward for the parse function provided by the parser (.y)
 int Aqlparse(arangodb::aql::Parser*);

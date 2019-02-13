@@ -54,8 +54,7 @@ namespace cache {
 class PlainCache final : public Cache {
  public:
   PlainCache(Cache::ConstructionGuard guard, Manager* manager, uint64_t id,
-             Metadata&& metadata, std::shared_ptr<Table> table,
-             bool enableWindowedStats);
+             Metadata&& metadata, std::shared_ptr<Table> table, bool enableWindowedStats);
   ~PlainCache();
 
   PlainCache() = delete;
@@ -70,7 +69,7 @@ class PlainCache final : public Cache {
   /// fashion. The Result contained in the return value should report an error
   /// code in this case. Should not block for long.
   //////////////////////////////////////////////////////////////////////////////
-  Finding find(void const* key, uint32_t keySize);
+  Finding find(void const* key, uint32_t keySize) override;
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Attempts to insert the given value.
@@ -80,7 +79,7 @@ class PlainCache final : public Cache {
   /// value if it fails to acquire a lock in a timely fashion. Should not block
   /// for long.
   //////////////////////////////////////////////////////////////////////////////
-  Result insert(CachedValue* value);
+  Result insert(CachedValue* value) override;
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Attempts to remove the given key.
@@ -90,12 +89,12 @@ class PlainCache final : public Cache {
   /// acquire a lock in a timely fashion. Makes more attempts to acquire a lock
   /// before quitting, so may block for longer than find or insert.
   //////////////////////////////////////////////////////////////////////////////
-  Result remove(void const* key, uint32_t keySize);
+  Result remove(void const* key, uint32_t keySize) override;
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Does nothing; convenience method inheritance compliance
   //////////////////////////////////////////////////////////////////////////////
-  Result blacklist(void const* key, uint32_t keySize);
+  Result blacklist(void const* key, uint32_t keySize) override;
 
  private:
   // friend class manager and tasks
@@ -109,14 +108,13 @@ class PlainCache final : public Cache {
                                        std::shared_ptr<Table> table,
                                        bool enableWindowedStats);
 
-  virtual uint64_t freeMemoryFrom(uint32_t hash);
-  virtual void migrateBucket(void* sourcePtr,
-                             std::unique_ptr<Table::Subtable> targets,
-                             std::shared_ptr<Table> newTable);
+  virtual uint64_t freeMemoryFrom(uint32_t hash) override;
+  virtual void migrateBucket(void* sourcePtr, std::unique_ptr<Table::Subtable> targets,
+                             std::shared_ptr<Table> newTable) override;
 
   // helpers
-  std::tuple<Result, PlainBucket*, Table*> getBucket(
-      uint32_t hash, uint64_t maxTries, bool singleOperation = true);
+  std::tuple<Result, PlainBucket*, Table*> getBucket(uint32_t hash, uint64_t maxTries,
+                                                     bool singleOperation = true);
   uint32_t getIndex(uint32_t hash, bool useAuxiliary) const;
 
   static Table::BucketClearer bucketClearer(Metadata* metadata);

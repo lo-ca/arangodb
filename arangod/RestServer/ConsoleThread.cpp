@@ -45,8 +45,7 @@ using namespace arangodb::rest;
 V8LineEditor* ConsoleThread::serverConsole = nullptr;
 Mutex ConsoleThread::serverConsoleMutex;
 
-ConsoleThread::ConsoleThread(ApplicationServer* applicationServer,
-                             TRI_vocbase_t* vocbase)
+ConsoleThread::ConsoleThread(ApplicationServer* applicationServer, TRI_vocbase_t* vocbase)
     : Thread("Console"),
       _applicationServer(applicationServer),
       _context(nullptr),
@@ -59,6 +58,12 @@ static char const* USER_ABORTED = "user aborted";
 
 void ConsoleThread::run() {
   std::this_thread::sleep_for(std::chrono::microseconds(100 * 1000));
+
+  bool v8Enabled = V8DealerFeature::DEALER && V8DealerFeature::DEALER->isEnabled();
+  if (!v8Enabled) {
+    LOG_TOPIC(FATAL, arangodb::Logger::FIXME) << "V8 engine is not enabled";
+    FATAL_ERROR_EXIT();
+  }
 
   // enter V8 context
   _context = V8DealerFeature::DEALER->enterContext(_vocbase, true);
@@ -114,7 +119,8 @@ void ConsoleThread::inner() {
 
     // read and eval .arangod.rc from home directory if it exists
     char const* startupScript = R"SCRIPT(
-start_pretty_print();
+start_pretty_print(true);
+start_color_print('arangodb', true);
 
 (function () {
   var __fs__ = require("fs");
@@ -143,7 +149,8 @@ start_pretty_print();
     sigaddset(&set, SIGINT);
 
     if (pthread_sigmask(SIG_UNBLOCK, &set, nullptr) < 0) {
-      LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "unable to install signal handler";
+      LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+          << "unable to install signal handler";
     }
 #endif
 
@@ -155,12 +162,11 @@ start_pretty_print();
       MUTEX_LOCKER(mutexLocker, serverConsoleMutex);
       serverConsole = &console;
     }
-  
+
     bool lastEmpty = false;
 
     while (!isStopping() && !_userAborted.load()) {
-      if (nrCommands >= gcInterval ||
-          V8PlatformFeature::isOutOfMemory(isolate)) {
+      if (nrCommands >= gcInterval || V8PlatformFeature::isOutOfMemory(isolate)) {
         TRI_RunGarbageCollectionV8(isolate, 0.5);
         nrCommands = 0;
 
@@ -175,7 +181,7 @@ start_pretty_print();
 
       {
         MUTEX_LOCKER(mutexLocker, serverConsoleMutex);
-        input = console.prompt("arangod> ", "arangod", eof);
+        input = console.prompt("arangod> ", "arangod>", eof);
       }
 
       if (eof == ShellBase::EOF_FORCE_ABORT || (eof == ShellBase::EOF_ABORT && lastEmpty)) {

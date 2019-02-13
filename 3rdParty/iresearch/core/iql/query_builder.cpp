@@ -172,7 +172,7 @@ const irs::iql::query_builder::branch_builder_function_t RANGE_II_BRANCH_BUILDER
 
     if (bMinValueNil && bMaxValueNil) {
       // exact equivalence optimization for nil value
-      root.proxy<iresearch::by_term>().field(field).term(iresearch::bytes_ref::nil);
+      root.proxy<iresearch::by_term>().field(field).term(iresearch::bytes_ref::NIL);
     }
     else if (!bMinValueNil && !bMaxValueNil && minValue == maxValue) {
       // exact equivalence optimization
@@ -211,7 +211,7 @@ const irs::iql::query_builder::branch_builder_function_t SIMILAR_BRANCH_BUILDER 
       return false;
     }
 
-    const iresearch::string_ref value_ref(bValueNil ? iresearch::string_ref::nil : iresearch::ref_cast<char>(value));
+    const iresearch::string_ref value_ref(bValueNil ? iresearch::string_ref::NIL : iresearch::ref_cast<char>(value));
     auto tokens = irs::analysis::analyzers::get(
       "text", irs::text_format::text, irs::locale_utils::name(locale)
     );
@@ -242,17 +242,17 @@ const irs::iql::query_builder::branch_builder_function_t SIMILAR_BRANCH_BUILDER 
         const iresearch::index_reader&,
         const iresearch::order::prepared&,
         boost_t,
-        const iresearch::attribute_view&) const {
+        const iresearch::attribute_view&) const override {
       iresearch::filter::prepared::ptr result; // null-ptr result
       return result;
     }
    private:
-    friend parse_context;
+    friend class parse_context;
     std::string sError;
     DECLARE_FILTER_TYPE();
   };
 
-  DEFINE_FILTER_TYPE(ErrorNode);
+  DEFINE_FILTER_TYPE(ErrorNode)
 
   ////////////////////////////////////////////////////////////////////////////////
   /// @brief proxy_filter specialized for iresearch::filter::ptr
@@ -269,26 +269,25 @@ const irs::iql::query_builder::branch_builder_function_t SIMILAR_BRANCH_BUILDER 
 
     template<typename... Args>
     static ptr make(Args&&... args) {
-      PTR_NAMED(LinkNode, ptr, std::forward<Args>(args)...);
-      return ptr;
+      return irs::memory::make_unique<LinkNode>(std::forward<Args>(args)...);
     }
 
    private:
     DECLARE_FILTER_TYPE();
   };
 
-  DEFINE_FILTER_TYPE(LinkNode);
+  DEFINE_FILTER_TYPE(LinkNode)
 
   class RootNode: public iresearch::Or {
    public:
-    DECLARE_FACTORY_DEFAULT();
+    DECLARE_FACTORY();
 
    private:
-    friend parse_context;
+    friend class parse_context;
     iresearch::order order;
     size_t nLimit;
   };
-  DEFINE_FACTORY_DEFAULT(RootNode);
+  DEFINE_FACTORY_DEFAULT(RootNode)
 
   class parse_context: public irs::iql::parser_context {
    public:
@@ -821,7 +820,7 @@ const irs::iql::query_builder::branch_builder_function_t SIMILAR_BRANCH_BUILDER 
     args.reserve(2);
 
     if (query_node::NodeType::UNKNOWN == min_node.type) {
-      args.emplace_back(iresearch::bytes_ref::nil);
+      args.emplace_back(iresearch::bytes_ref::NIL);
     }
     else {
       auto errorNodeId = append_function_arg(args, min_node_id);
@@ -832,7 +831,7 @@ const irs::iql::query_builder::branch_builder_function_t SIMILAR_BRANCH_BUILDER 
     }
 
     if (query_node::NodeType::UNKNOWN == max_node.type) {
-      args.emplace_back(iresearch::bytes_ref::nil);
+      args.emplace_back(iresearch::bytes_ref::NIL);
     }
     else {
       auto errorNodeId = append_function_arg(args, max_value_id);
@@ -959,8 +958,8 @@ query query_builder::build(
 // --SECTION--                                                 private functions
 // -----------------------------------------------------------------------------
 
-DEFINE_FILTER_TYPE(proxy_filter);
-DEFINE_FACTORY_DEFAULT(proxy_filter);
+DEFINE_FILTER_TYPE(proxy_filter)
+DEFINE_FACTORY_DEFAULT(proxy_filter)
 
 NS_END // iql
 NS_END // NS_ROOT

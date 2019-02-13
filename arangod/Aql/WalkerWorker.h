@@ -33,9 +33,9 @@ namespace aql {
 template <class T>
 class WalkerWorker {
  public:
-  WalkerWorker() {}
+  WalkerWorker() = default;
 
-  virtual ~WalkerWorker() {}
+  virtual ~WalkerWorker() = default;
 
   virtual bool before(T*) {
     return false;  // true to abort the whole walking process
@@ -49,17 +49,17 @@ class WalkerWorker {
 
   virtual void leaveSubquery(T*,  // super,
                              T*   // sub
-                             ) {}
+  ) {}
 
 #ifdef ARANGODB_ENABLE_FAILURE_TESTS
 
   bool done(T* en) {
     // make sure a node is only processed once
-    if (_done.find(en) == _done.end()) {
-      _done.emplace(en);
+    if (_done.emplace(en).second) {
       return false;
     }
 
+    // should never happen
     TRI_ASSERT(false);
 
     return true;
@@ -82,7 +82,7 @@ class WalkerWorker {
   std::unordered_set<T*> _done;
 #endif
 };
-}
-}
+}  // namespace aql
+}  // namespace arangodb
 
 #endif

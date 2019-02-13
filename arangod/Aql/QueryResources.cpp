@@ -33,41 +33,49 @@ using namespace arangodb::aql;
 namespace {
 /// @brief empty string singleton
 static char const* EmptyString = "";
-}
+}  // namespace
 
 QueryResources::QueryResources(ResourceMonitor* resourceMonitor)
     : _resourceMonitor(resourceMonitor),
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
       _stringsLength(0),
-      _shortStringStorage(_resourceMonitor, 1024) {}
+#endif
+      _shortStringStorage(_resourceMonitor, 1024) {
+}
 
 QueryResources::~QueryResources() {
   // free strings
   for (auto& it : _strings) {
     TRI_FreeString(it);
   }
-    
-  _resourceMonitor->decreaseMemoryUsage(_strings.capacity() * sizeof(char*) + _stringsLength);
 
   // free nodes
   for (auto& it : _nodes) {
     delete it;
   }
-  
-  _resourceMonitor->decreaseMemoryUsage(_nodes.size() * sizeof(AstNode) + _nodes.capacity() * sizeof(AstNode*));
+
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+  // we are in the destructor here already. decreasing the memory usage counters
+  // will only provide a benefit (in terms of assertions) if we are in
+  // maintainer mode, so we can save all these operations in non-maintainer mode
+  _resourceMonitor->decreaseMemoryUsage(_strings.capacity() * sizeof(char*) + _stringsLength);
+  _resourceMonitor->decreaseMemoryUsage(_nodes.size() * sizeof(AstNode) +
+                                        _nodes.capacity() * sizeof(AstNode*));
+#endif
 }
 
-void QueryResources::steal() {
-  // we are not responsible for freeing any data, so we delete our inventory
-  _strings.clear();
-  _nodes.clear();
-}
-  
 /// @brief add a node to the list of nodes
-void QueryResources::addNode(AstNode* node) { 
+void QueryResources::addNode(AstNode* node) {
+  auto guard = scopeGuard([node]() {
+    // in case something goes wrong, we must free the node we got to prevent
+    // memleaks
+    delete node;
+  });
+
   size_t capacity;
 
   if (_nodes.empty()) {
-    // reserve some initial space for nodes 
+    // reserve some initial space for nodes
     capacity = 64;
   } else {
     capacity = _nodes.size() + 1;
@@ -81,14 +89,24 @@ void QueryResources::addNode(AstNode* node) {
   // reserve space for pointers
   if (capacity > _nodes.capacity()) {
     _resourceMonitor->increaseMemoryUsage((capacity - _nodes.capacity()) * sizeof(AstNode*));
-    _nodes.reserve(capacity);
+    try {
+      _nodes.reserve(capacity);
+    } catch (...) {
+      // revert change in memory increase
+      _resourceMonitor->decreaseMemoryUsage((capacity - _nodes.capacity()) *
+                                            sizeof(AstNode*));
+      throw;
+    }
   }
 
   // may throw
   _resourceMonitor->increaseMemoryUsage(sizeof(AstNode));
-  
+
   // will not fail
-  _nodes.emplace_back(node); 
+  _nodes.push_back(node);
+
+  // safely took over the ownership for the node, cancel the deletion now
+  guard.cancel();
 }
 
 /// @brief register a string
@@ -103,7 +121,7 @@ char* QueryResources::registerString(char const* p, size_t length) {
     return const_cast<char*>(EmptyString);
   }
 
-  if (length < ShortStringStorage::maxStringLength()) {
+  if (length < ShortStringStorage::maxStringLength) {
     return _shortStringStorage.registerString(p, length);
   }
 
@@ -113,8 +131,7 @@ char* QueryResources::registerString(char const* p, size_t length) {
 
 /// @brief register a potentially UTF-8-escaped string
 /// the string is freed when the query is destroyed
-char* QueryResources::registerEscapedString(char const* p, size_t length,
-                                            size_t& outLength) {
+char* QueryResources::registerEscapedString(char const* p, size_t length, size_t& outLength) {
   if (p == nullptr) {
     THROW_ARANGO_EXCEPTION(TRI_ERROR_OUT_OF_MEMORY);
   }
@@ -125,46 +142,66 @@ char* QueryResources::registerEscapedString(char const* p, size_t length,
     return const_cast<char*>(EmptyString);
   }
 
+  if (length < ShortStringStorage::maxStringLength) {
+    return _shortStringStorage.unescape(p, length, &outLength);
+  }
+
   char* copy = TRI_UnescapeUtf8String(p, length, &outLength, false);
   return registerLongString(copy, outLength);
 }
 
-char* QueryResources::registerLongString(char* copy, size_t length) {  
+/// @brief registers a long string and takes over the ownership for it
+char* QueryResources::registerLongString(char* copy, size_t length) {
   if (copy == nullptr) {
     THROW_ARANGO_EXCEPTION(TRI_ERROR_OUT_OF_MEMORY);
   }
 
-  try {
-    size_t capacity;
-    
-    if (_strings.empty()) {
-      // reserve some initial space for string storage 
-      capacity = 8;
-    } else {
-      capacity = (std::max)(_strings.size() + 8, _strings.capacity());
-    }
+  auto guard = scopeGuard([copy]() {
+    // in case something goes wrong, we must free the string we got to prevent
+    // memleaks
+    TRI_FreeString(copy);
+  });
 
-    TRI_ASSERT(capacity > _strings.size());
-    TRI_ASSERT(capacity >= _strings.capacity());
-    
-    // reserve space
-    _resourceMonitor->increaseMemoryUsage(((capacity - _strings.size()) * sizeof(char*)) + length);
+  size_t capacity;
+
+  if (_strings.empty()) {
+    // reserve some initial space for string storage
+    capacity = 8;
+  } else {
+    capacity = _strings.size() + 1;
+    if (capacity > _strings.capacity()) {
+      capacity *= 2;
+    }
+  }
+
+  TRI_ASSERT(capacity > _strings.size());
+
+  // reserve space
+  if (capacity > _strings.capacity()) {
+    // not enough capacity...
+    _resourceMonitor->increaseMemoryUsage(
+        ((capacity - _strings.size()) * sizeof(char*)) + length);
     try {
       _strings.reserve(capacity);
     } catch (...) {
       // revert change in memory increase
-      _resourceMonitor->decreaseMemoryUsage(((capacity - _strings.size()) * sizeof(char*)) + length);
+      _resourceMonitor->decreaseMemoryUsage(
+          ((capacity - _strings.size()) * sizeof(char*)) + length);
       throw;
     }
-    
-    // will not fail 
-    _strings.emplace_back(copy);
-    _stringsLength += length;
-
-    return copy;
-  } catch (...) {
-    // prevent memleak
-    TRI_FreeString(copy);
-    throw;
+  } else {
+    // got enough capacity for the new string
+    _resourceMonitor->increaseMemoryUsage(length);
   }
+
+  // will not fail
+  _strings.push_back(copy);
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+  _stringsLength += length;
+#endif
+
+  // safely took over the ownership fo the string, cancel the deletion now
+  guard.cancel();
+
+  return copy;
 }

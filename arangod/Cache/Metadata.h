@@ -65,12 +65,12 @@ struct Metadata {
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Initializes record from an existing record.
   //////////////////////////////////////////////////////////////////////////////
-  Metadata(Metadata const& other);
+  Metadata(Metadata&& other);
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Initializes record from an existing record.
   //////////////////////////////////////////////////////////////////////////////
-  Metadata& operator=(Metadata const& other);
+  Metadata& operator=(Metadata&& other);
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Locks the record for reading
@@ -163,7 +163,7 @@ struct Metadata {
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Toggles the migrating flag. Requires record to be write-locked.
   //////////////////////////////////////////////////////////////////////////////
-  void toggleMigrating() noexcept  { _migrating  = !_migrating; }
+  void toggleMigrating() noexcept { _migrating = !_migrating; }
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief Toggles the resizing flag. Requires record to be write-locked.
@@ -171,7 +171,7 @@ struct Metadata {
   void toggleResizing() noexcept { _resizing = !_resizing; }
 
  private:
-  mutable basics::ReadWriteSpinLock<64> _lock;
+  mutable basics::ReadWriteSpinLock _lock;
   bool _migrating;
   bool _resizing;
 };

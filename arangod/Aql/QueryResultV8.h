@@ -24,8 +24,8 @@
 #ifndef ARANGOD_AQL_QUERY_RESULT_V8_H
 #define ARANGOD_AQL_QUERY_RESULT_V8_H 1
 
-#include "Basics/Common.h"
 #include "Aql/QueryResult.h"
+#include "Basics/Common.h"
 
 #include <v8.h>
 
@@ -46,9 +46,14 @@ struct QueryResultV8 : public QueryResult {
   QueryResultV8() : QueryResult(TRI_ERROR_NO_ERROR) {}
   explicit QueryResultV8(int code) : QueryResult(code, ""), result() {}
 
+  void set(int c, std::string const& d) {
+    QueryResult::set(c, d);
+    result.Clear();
+  }
+
   v8::Handle<v8::Array> result;
 };
-}
-}
+}  // namespace aql
+}  // namespace arangodb
 
 #endif

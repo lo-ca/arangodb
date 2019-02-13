@@ -136,10 +136,10 @@ class boolean_query : public filter::prepared {
   typedef std::vector<filter::prepared::ptr> queries_t;
   typedef ptr_iterator<queries_t::const_iterator> iterator;
 
-  DECLARE_SPTR(boolean_query);
-  DECLARE_FACTORY(boolean_query);
+  DECLARE_SHARED_PTR(boolean_query);
+  DEFINE_FACTORY_INLINE(boolean_query)
 
-  boolean_query() : excl_(0)  { }
+  boolean_query() NOEXCEPT : excl_(0) { }
 
   virtual doc_iterator::ptr execute(
       const sub_reader& rdr,
@@ -353,7 +353,7 @@ boolean_filter::boolean_filter(const type_id& type) NOEXCEPT
   : filter(type) {
 }
 
-size_t boolean_filter::hash() const {
+size_t boolean_filter::hash() const NOEXCEPT {
   size_t seed = 0; 
 
   ::boost::hash_combine(seed, filter::hash());
@@ -366,7 +366,7 @@ size_t boolean_filter::hash() const {
   return seed;
 }
 
-bool boolean_filter::equals(const filter& rhs) const {
+bool boolean_filter::equals(const filter& rhs) const NOEXCEPT {
   const boolean_filter& typed_rhs = static_cast< const boolean_filter& >( rhs );
 
   return filter::equals(rhs)
@@ -409,15 +409,25 @@ void boolean_filter::group_filters(
   incl.reserve(size() / 2);
   excl.reserve(incl.capacity());
   for (auto begin = this->begin(), end = this->end(); begin != end; ++begin) {
-    const Not* not_node = begin.safe_as<Not>();
-    if (not_node) {
-      const auto res = optimize_not(*not_node);
+    if (Not::type() == begin->type()) {
+#ifdef IRESEARCH_DEBUG
+      const auto& not_node = dynamic_cast<const Not&>(*begin);
+#else
+      const auto& not_node = static_cast<const Not&>(*begin);
+#endif
+      const auto res = optimize_not(not_node);
 
       if (!res.first) {
         continue;
       }
 
       if (res.second) {
+        if (all::type() == res.first->type()) {
+          // not all -> empty result
+          incl.clear();
+          return;
+        }
+
         excl.push_back(res.first);
       } else {
         incl.push_back(res.first);
@@ -432,8 +442,8 @@ void boolean_filter::group_filters(
 // --SECTION--                                                              And
 // ----------------------------------------------------------------------------
 
-DEFINE_FILTER_TYPE(And);
-DEFINE_FACTORY_DEFAULT(And);
+DEFINE_FILTER_TYPE(And)
+DEFINE_FACTORY_DEFAULT(And)
 
 And::And() NOEXCEPT
   : boolean_filter(And::type()) {
@@ -461,8 +471,8 @@ void And::optimize(
   }
 
   // accumulate boost
-  boost *= std::accumulate(
-    it, incl.end(), irs::boost::no_boost(),
+  boost = std::accumulate(
+    it, incl.end(), boost,
     [](irs::boost::boost_t boost, const irs::filter* filter) {
       return filter->boost() * boost;
   });
@@ -487,8 +497,8 @@ filter::prepared::ptr And::prepare(
 // --SECTION--                                                               Or 
 // ----------------------------------------------------------------------------
 
-DEFINE_FILTER_TYPE(Or);
-DEFINE_FACTORY_DEFAULT(Or);
+DEFINE_FILTER_TYPE(Or)
+DEFINE_FACTORY_DEFAULT(Or)
 
 Or::Or() NOEXCEPT
   : boolean_filter(Or::type()),
@@ -521,8 +531,8 @@ filter::prepared::ptr Or::prepare(
 // --SECTION--                                                              Not 
 // ----------------------------------------------------------------------------
 
-DEFINE_FILTER_TYPE(Not);
-DEFINE_FACTORY_DEFAULT(Not);
+DEFINE_FILTER_TYPE(Not)
+DEFINE_FACTORY_DEFAULT(Not)
 
 Not::Not() NOEXCEPT
   : irs::filter(Not::type()) {
@@ -555,7 +565,7 @@ filter::prepared::ptr Not::prepare(
   return res.first->prepare(rdr, ord, boost, ctx);
 }
 
-size_t Not::hash() const {
+size_t Not::hash() const NOEXCEPT {
   size_t seed = 0;
   ::boost::hash_combine(seed, filter::hash());
   if (filter_) {
@@ -564,7 +574,7 @@ size_t Not::hash() const {
   return seed;
 }
 
-bool Not::equals(const irs::filter& rhs) const {
+bool Not::equals(const irs::filter& rhs) const NOEXCEPT {
   const Not& typed_rhs = static_cast<const Not&>(rhs);
   return filter::equals(rhs)
     && ((!empty() && !typed_rhs.empty() && *filter_ == *typed_rhs.filter_)

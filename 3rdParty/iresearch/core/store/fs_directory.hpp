@@ -35,17 +35,11 @@ NS_ROOT
 //////////////////////////////////////////////////////////////////////////////
 class IRESEARCH_API fs_directory : public directory {
  public:
-  static bool create_directory(const string_ref& dir);
-
-  static bool remove_directory(const string_ref& dir);
-
   explicit fs_directory(const std::string& dir);
 
   using directory::attributes;
 
   virtual attribute_store& attributes() NOEXCEPT override;
-
-  virtual void close() NOEXCEPT override;
 
   virtual index_output::ptr create(const std::string& name) NOEXCEPT override;
 

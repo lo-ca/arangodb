@@ -32,17 +32,17 @@ class RocksDBSkiplistIndex final : public RocksDBVPackIndex {
  public:
   RocksDBSkiplistIndex() = delete;
 
-  RocksDBSkiplistIndex(TRI_idx_iid_t iid, LogicalCollection* coll,
+  RocksDBSkiplistIndex(TRI_idx_iid_t iid, LogicalCollection& coll,
                        arangodb::velocypack::Slice const& info)
       : RocksDBVPackIndex(iid, coll, info) {}
 
- public:
   IndexType type() const override { return Index::TRI_IDX_TYPE_SKIPLIST_INDEX; }
 
   char const* typeName() const override { return "rocksdb-skiplist"; }
 
   bool isSorted() const override { return true; }
 };
-}
+
+}  // namespace arangodb
 
 #endif

@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2014-2016 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2014-2018 ArangoDB GmbH, Cologne, Germany
 /// Copyright 2004-2014 triAGENS GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,19 +38,22 @@ namespace rest {
 
 class RestAgencyCallbacksHandler : public RestVocbaseBaseHandler {
  public:
-  RestAgencyCallbacksHandler(GeneralRequest* request,
-                             GeneralResponse* response,
+  RestAgencyCallbacksHandler(GeneralRequest* request, GeneralResponse* response,
                              AgencyCallbackRegistry* agencyCallbackRegistry);
 
  public:
-  char const* name() const override final { return "RestAgencyCallbacksHandler"; }
-  bool isDirect() const override;
+  char const* name() const override final {
+    return "RestAgencyCallbacksHandler";
+  }
+  RequestLane lane() const override final {
+    return RequestLane::AGENCY_INTERNAL;
+  }
   RestStatus execute() override;
 
  private:
   AgencyCallbackRegistry* _agencyCallbackRegistry;
 };
-}
-}
+}  // namespace rest
+}  // namespace arangodb
 
 #endif

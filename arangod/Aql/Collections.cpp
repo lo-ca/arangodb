@@ -47,8 +47,7 @@ Collection* Collections::get(std::string const& name) const {
   return nullptr;
 }
 
-Collection* Collections::add(std::string const& name,
-                             AccessMode::Type accessType) {
+Collection* Collections::add(std::string const& name, AccessMode::Type accessType) {
   // check if collection already is in our map
   TRI_ASSERT(!name.empty());
   auto it = _collections.find(name);
@@ -62,18 +61,21 @@ Collection* Collections::add(std::string const& name,
     _collections.emplace(name, collection.get());
 
     return collection.release();
-  } else {
-    // note that the collection is used in both read & write ops
-    if (accessType != (*it).second->accessType) {
-      (*it).second->isReadWrite = true;
-    }
-
-    // change access type from read to write
-    if (accessType == AccessMode::Type::WRITE &&
-        (*it).second->accessType == AccessMode::Type::READ) {
-      (*it).second->accessType = AccessMode::Type::WRITE;
-    }
   }
+  // note that the collection is used in both read & write ops
+  if (AccessMode::isReadWriteChange(accessType, (*it).second->accessType())) {
+    (*it).second->isReadWrite(true);
+  }
+
+  // change access type from read to write
+  if (AccessMode::isWriteOrExclusive(accessType) &&
+      (*it).second->accessType() == AccessMode::Type::READ) {
+    (*it).second->accessType(accessType);
+  } else if (AccessMode::isExclusive(accessType)) {
+    // exclusive flag always wins
+    (*it).second->accessType(accessType);
+  }
+
   return (*it).second;
 }
 

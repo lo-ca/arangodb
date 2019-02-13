@@ -1,7 +1,7 @@
 project(boost)
 
 #the boost version must also be adjusted in the top-level CMakeLists.txt file
-set(boost_version "1.62.0")
+set(boost_version "1.69.0")
 set(BOOST_VERSION ${boost_version} PARENT_SCOPE)
 set(boost_src "${CMAKE_CURRENT_SOURCE_DIR}/${boost_version}")
 
@@ -87,7 +87,7 @@ add_library(boost_locale STATIC
 )
 add_dependencies(boost_locale v8_build) # for ICU libs
 target_link_libraries(boost_locale PUBLIC boost_boost) #this will add required includes
-target_include_directories(boost_locale PRIVATE ${ICU_INCLUDE_DIR})
+target_include_directories(boost_locale SYSTEM PRIVATE ${ICU_INCLUDE_DIR})
 target_compile_definitions(boost_locale PRIVATE "BOOST_SYSTEM_STATIC_LINK=1")
 target_compile_definitions(boost_locale PUBLIC  "BOOST_ALL_NO_LIB=1")
 

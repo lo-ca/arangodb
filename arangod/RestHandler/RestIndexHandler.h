@@ -23,30 +23,29 @@
 #ifndef ARANGOD_REST_HANDLER_INDEX_HANDLER_H
 #define ARANGOD_REST_HANDLER_INDEX_HANDLER_H 1
 
-#include "RestHandler/RestVocbaseBaseHandler.h"
 #include <memory>
 #include <string>
+#include "RestHandler/RestVocbaseBaseHandler.h"
 
 namespace arangodb {
 class LogicalCollection;
-  
+
 class RestIndexHandler : public arangodb::RestVocbaseBaseHandler {
  public:
   RestIndexHandler(GeneralRequest*, GeneralResponse*);
 
  public:
   char const* name() const override final { return "RestIndexHandler"; }
-  bool isDirect() const override { return true; }
+  RequestLane lane() const override final { return RequestLane::CLIENT_SLOW; }
   RestStatus execute() override;
 
  private:
   RestStatus getIndexes();
   RestStatus createIndex();
   RestStatus dropIndex();
-  
-  LogicalCollection* collection(std::string const& cName,
-                                std::shared_ptr<LogicalCollection>& coll);
+
+  std::shared_ptr<LogicalCollection> collection(std::string const& cName);
 };
-}
+}  // namespace arangodb
 
 #endif

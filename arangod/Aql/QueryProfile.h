@@ -24,8 +24,8 @@
 #ifndef ARANGOD_AQL_QUERY_PROFILE_H
 #define ARANGOD_AQL_QUERY_PROFILE_H 1
 
-#include "Basics/Common.h"
 #include "Aql/QueryExecutionState.h"
+#include "Basics/Common.h"
 
 #include <array>
 
@@ -46,26 +46,35 @@ struct QueryProfile {
 
   ~QueryProfile();
 
-  double setDone(QueryExecutionState::ValueType);
+ public:
+  double setStateDone(QueryExecutionState::ValueType);
 
   /// @brief sets the absolute end time for an execution state
-  void setEnd(QueryExecutionState::ValueType state, double time);
+  void setStateEnd(QueryExecutionState::ValueType state, double time);
+
+  /// @brief get a timer time
+  inline double timer(QueryExecutionState::ValueType t) const {
+    return _timers[QueryExecutionState::toNumber(t)];
+  }
 
   /// @brief convert the profile to VelocyPack
-  std::shared_ptr<arangodb::velocypack::Builder> toVelocyPack();
+  void toVelocyPack(arangodb::velocypack::Builder&) const;
 
-  Query* query;
-  std::array<double, static_cast<size_t>(QueryExecutionState::ValueType::INVALID_STATE)> timers;
-  double stamp;
-  bool tracked;
+ private:
+  Query* _query;
+  std::array<double, static_cast<size_t>(QueryExecutionState::ValueType::INVALID_STATE)> _timers;
+  double _lastStamp;
+  bool _tracked;
 };
 
 // we want the number of execution states to be quite low
 // as we reserve a statically sized array for it
-static_assert(static_cast<int>(QueryExecutionState::ValueType::INITIALIZATION) == 0, "unexpected min QueryExecutionState enum value");
-static_assert(static_cast<int>(QueryExecutionState::ValueType::INVALID_STATE) < 10, "unexpected max QueryExecutionState enum value");
+static_assert(static_cast<int>(QueryExecutionState::ValueType::INITIALIZATION) == 0,
+              "unexpected min QueryExecutionState enum value");
+static_assert(static_cast<int>(QueryExecutionState::ValueType::INVALID_STATE) < 10,
+              "unexpected max QueryExecutionState enum value");
 
-}
-}
+}  // namespace aql
+}  // namespace arangodb
 
 #endif

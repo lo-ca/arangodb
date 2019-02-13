@@ -93,7 +93,7 @@ CachedValue* TransactionalBucket::find(uint32_t hash, void const* key,
 
 void TransactionalBucket::insert(uint32_t hash, CachedValue* value) {
   TRI_ASSERT(isLocked());
-  TRI_ASSERT(!isBlacklisted(hash)); // checks needs to be done outside
+  TRI_ASSERT(!isBlacklisted(hash));  // checks needs to be done outside
 
   for (size_t i = 0; i < slotsData; i++) {
     if (_cachedData[i] == nullptr) {
@@ -108,8 +108,7 @@ void TransactionalBucket::insert(uint32_t hash, CachedValue* value) {
   }
 }
 
-CachedValue* TransactionalBucket::remove(uint32_t hash, void const* key,
-                                         size_t keySize) {
+CachedValue* TransactionalBucket::remove(uint32_t hash, void const* key, size_t keySize) {
   TRI_ASSERT(isLocked());
   CachedValue* value = find(hash, key, keySize, false);
   if (value != nullptr) {
@@ -119,8 +118,7 @@ CachedValue* TransactionalBucket::remove(uint32_t hash, void const* key,
   return value;
 }
 
-CachedValue* TransactionalBucket::blacklist(uint32_t hash, void const* key,
-                                            size_t keySize) {
+CachedValue* TransactionalBucket::blacklist(uint32_t hash, void const* key, size_t keySize) {
   TRI_ASSERT(isLocked());
   if (!haveOpenTransaction()) {
     return nullptr;
@@ -198,7 +196,16 @@ void TransactionalBucket::evict(CachedValue* value, bool optimizeForInsertion) {
 
 void TransactionalBucket::clear() {
   TRI_ASSERT(isLocked());
-  memset(this, 0, sizeof(TransactionalBucket));
+  _state.clear();  // "clear" will keep the lock!
+  for (size_t i = 0; i < slotsBlacklist; ++i) {
+    _blacklistHashes[i] = 0;
+  }
+  _blacklistTerm = 0;
+  for (size_t i = 0; i < slotsData; ++i) {
+    _cachedHashes[i] = 0;
+    _cachedData[i] = nullptr;
+  }
+  _state.unlock();
 }
 
 void TransactionalBucket::updateBlacklistTerm(uint64_t term) {

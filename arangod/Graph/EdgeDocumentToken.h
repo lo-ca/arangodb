@@ -26,6 +26,7 @@
 
 #include "Basics/Common.h"
 #include "Basics/StringRef.h"
+#include "Cluster/ServerState.h"
 #include "VocBase/LocalDocumentId.h"
 #include "VocBase/voc-types.h"
 
@@ -35,49 +36,50 @@ namespace graph {
 
 /// @brief Pure virtual abstract class to uniquely identify an edge
 struct EdgeDocumentToken {
-  
   EdgeDocumentToken() noexcept
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
-    : _data(0, LocalDocumentId()), _type(TokenType::NONE) {}
+      : _data(0, LocalDocumentId()), _type(TokenType::NONE) {
+  }
 #else
-    : _data(0, LocalDocumentId()) {}
+      : _data(0, LocalDocumentId()) {
+  }
 #endif
-  
-  EdgeDocumentToken(EdgeDocumentToken&& edtkn) noexcept {
+
+  EdgeDocumentToken(EdgeDocumentToken&& edtkn) noexcept : _data(edtkn._data) {
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
     _type = edtkn._type;
 #endif
-    memmove(&(this->_data), &(edtkn._data), sizeof(TokenData));
   }
-  
-  EdgeDocumentToken(EdgeDocumentToken const& edtkn) noexcept {
+
+  EdgeDocumentToken(EdgeDocumentToken const& edtkn) noexcept
+      : _data(edtkn._data) {
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
     _type = edtkn._type;
 #endif
-    memcpy(&(this->_data), &(edtkn._data), sizeof(TokenData));
   }
-  
-  EdgeDocumentToken(TRI_voc_cid_t const cid,
-                    LocalDocumentId const localDocumentId) noexcept : _data(cid, localDocumentId) {
+
+  EdgeDocumentToken(TRI_voc_cid_t const cid, LocalDocumentId const localDocumentId) noexcept
+      : _data(cid, localDocumentId) {
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
     _type = EdgeDocumentToken::TokenType::LOCAL;
 #endif
   }
-  
-  EdgeDocumentToken(arangodb::velocypack::Slice const& edge) noexcept : _data(edge) {
+
+  EdgeDocumentToken(arangodb::velocypack::Slice const& edge) noexcept
+      : _data(edge) {
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
     _type = EdgeDocumentToken::TokenType::COORDINATOR;
 #endif
   }
-  
+
   EdgeDocumentToken& operator=(EdgeDocumentToken&& edtkn) {
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
     _type = edtkn._type;
 #endif
-    memcpy(&(this->_data), &(edtkn._data), sizeof(TokenData));
+    _data = edtkn._data;
     return *this;
   }
-  
+
   TRI_voc_cid_t cid() const {
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
     TRI_ASSERT(_type == TokenType::LOCAL);
@@ -85,7 +87,7 @@ struct EdgeDocumentToken {
     TRI_ASSERT(_data.document.cid != 0);
     return _data.document.cid;
   }
-  
+
   LocalDocumentId localDocumentId() const {
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
     TRI_ASSERT(_type == TokenType::LOCAL);
@@ -93,7 +95,7 @@ struct EdgeDocumentToken {
     TRI_ASSERT(_data.document.localDocumentId.isSet());
     return _data.document.localDocumentId;
   }
-  
+
   uint8_t const* vpack() const {
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
     TRI_ASSERT(_type == TokenType::COORDINATOR);
@@ -101,16 +103,15 @@ struct EdgeDocumentToken {
     TRI_ASSERT(_data.vpack);
     return _data.vpack;
   }
-  
+
   bool equalsCoordinator(EdgeDocumentToken const& other) const {
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
     TRI_ASSERT(_type == TokenType::COORDINATOR);
 #endif
     // FIXME:
-    return velocypack::Slice(_data.vpack) ==
-           velocypack::Slice(other._data.vpack);
+    return velocypack::Slice(_data.vpack) == velocypack::Slice(other._data.vpack);
   }
-  
+
   bool equalsLocal(EdgeDocumentToken const& other) const {
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
     TRI_ASSERT(_type == TokenType::LOCAL);
@@ -118,9 +119,15 @@ struct EdgeDocumentToken {
     return _data.document.cid == other.cid() &&
            _data.document.localDocumentId == other.localDocumentId();
   }
-  
-private:
-  
+
+  bool equals(EdgeDocumentToken const& other) const {
+    if (ServerState::instance()->isCoordinator()) {
+      return equalsCoordinator(other);
+    }
+    return equalsLocal(other);
+  }
+
+ private:
   /// Identifying information for an edge documents valid on one server
   /// only used on a dbserver or single server
   struct LocalDocument {
@@ -128,38 +135,41 @@ private:
     LocalDocumentId localDocumentId;
     ~LocalDocument() {}
   };
-  
+
   /// fixed size union, works for both single server and
   /// cluster case
   union TokenData {
     EdgeDocumentToken::LocalDocument document;
     uint8_t const* vpack;
-    
-    TokenData() {
-      vpack = nullptr;
-    }
-    TokenData(velocypack::Slice const& edge) : vpack(edge.begin()) {
+
+    TokenData() noexcept { vpack = nullptr; }
+    TokenData(velocypack::Slice const& edge) noexcept : vpack(edge.begin()) {
       TRI_ASSERT(!velocypack::Slice(vpack).isExternal());
     }
-    TokenData(TRI_voc_cid_t cid, LocalDocumentId tk) {
+    TokenData(TRI_voc_cid_t cid, LocalDocumentId tk) noexcept {
       document.cid = cid;
       document.localDocumentId = tk;
     }
+    TokenData(TokenData const& other) noexcept : document(other.document) {}
+    TokenData& operator=(TokenData const& other) noexcept {
+      document = other.document;
+      return *this;
+    }
+
     ~TokenData() {}
   };
-  
+
+  static_assert(sizeof(TokenData::document) >= sizeof(TokenData::vpack),
+                "invalid TokenData struct");
+
   TokenData _data;
-  
+
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
-  enum TokenType : uint8_t {
-    NONE,
-    LOCAL,
-    COORDINATOR
-  };
+  enum TokenType : uint8_t { NONE, LOCAL, COORDINATOR };
   TokenType _type;
 #endif
 };
-}
+}  // namespace graph
 
-}
+}  // namespace arangodb
 #endif

@@ -75,7 +75,7 @@ struct Entry<Element, IndexType, false> {
 };
 
 template <class Element, class IndexType, bool useHashCache>
-class MultiInserterTask : public LocalTask {
+class MultiInserterTask final : public LocalTask {
  private:
   typedef Entry<Element, IndexType, useHashCache> EntryType;
   typedef arangodb::basics::IndexBucket<EntryType, IndexType, SIZE_MAX> Bucket;
@@ -83,9 +83,7 @@ class MultiInserterTask : public LocalTask {
 
   std::function<void(void*)> _contextDestroyer;
   std::vector<Bucket>* _buckets;
-  std::function<Element(void*, Element const&, uint64_t, Bucket&, bool const,
-                        bool const)>
-      _doInsert;
+  std::function<Element(void*, Element const&, uint64_t, Bucket&, bool const, bool const)> _doInsert;
 
   size_t _i;
   void* _userData;
@@ -94,11 +92,9 @@ class MultiInserterTask : public LocalTask {
 
  public:
   MultiInserterTask(
-      std::shared_ptr<LocalTaskQueue> queue, std::function<void(void*)> contextDestroyer,
-      std::vector<Bucket>* buckets,
-      std::function<Element(void*, Element const&, uint64_t, Bucket&,
-                            bool const, bool const)>
-          doInsert,
+      std::shared_ptr<LocalTaskQueue> queue,
+      std::function<void(void*)> contextDestroyer, std::vector<Bucket>* buckets,
+      std::function<Element(void*, Element const&, uint64_t, Bucket&, bool const, bool const)> doInsert,
       size_t i, void* userData,
       std::shared_ptr<std::vector<std::vector<DocumentsPerBucket>>> allBuckets)
       : LocalTask(queue),
@@ -109,11 +105,10 @@ class MultiInserterTask : public LocalTask {
         _userData(userData),
         _allBuckets(allBuckets) {}
 
-  void run() {
+  void run() override {
     // sort first so we have a deterministic insertion order
     std::sort((*_allBuckets)[_i].begin(), (*_allBuckets)[_i].end(),
-              [](DocumentsPerBucket const& lhs,
-                 DocumentsPerBucket const& rhs) -> bool {
+              [](DocumentsPerBucket const& lhs, DocumentsPerBucket const& rhs) -> bool {
                 if (lhs.empty() && rhs.empty()) {
                   return false;
                 }
@@ -145,12 +140,12 @@ class MultiInserterTask : public LocalTask {
 };
 
 template <class Element, class IndexType, bool useHashCache>
-class MultiPartitionerTask : public LocalTask {
+class MultiPartitionerTask final : public LocalTask {
  private:
   typedef MultiInserterTask<Element, IndexType, useHashCache> Inserter;
   typedef std::vector<std::pair<Element, uint64_t>> DocumentsPerBucket;
 
-  std::function<uint64_t(void*, Element const&, bool)> _hashElement;
+  std::function<uint64_t(Element const&, bool)> _hashElement;
   std::function<void(void*)> _contextDestroyer;
   std::shared_ptr<std::vector<Element> const> _data;
   std::vector<Element> const* _elements;
@@ -167,16 +162,15 @@ class MultiPartitionerTask : public LocalTask {
   uint64_t _bucketsMask;
 
  public:
-  MultiPartitionerTask(
-      std::shared_ptr<LocalTaskQueue> queue,
-      std::function<uint64_t(void*, Element const&, bool)> hashElement,
-      std::function<void(void*)> const& contextDestroyer,
-      std::shared_ptr<std::vector<Element> const> data, size_t lower,
-      size_t upper, void* userData,
-      std::shared_ptr<std::vector<std::atomic<size_t>>> bucketFlags,
-      std::shared_ptr<std::vector<arangodb::Mutex>> bucketMapLocker,
-      std::shared_ptr<std::vector<std::vector<DocumentsPerBucket>>> allBuckets,
-      std::shared_ptr<std::vector<std::shared_ptr<Inserter>>> inserters)
+  MultiPartitionerTask(std::shared_ptr<LocalTaskQueue> queue,
+                       std::function<uint64_t(Element const&, bool)> hashElement,
+                       std::function<void(void*)> const& contextDestroyer,
+                       std::shared_ptr<std::vector<Element> const> data,
+                       size_t lower, size_t upper, void* userData,
+                       std::shared_ptr<std::vector<std::atomic<size_t>>> bucketFlags,
+                       std::shared_ptr<std::vector<arangodb::Mutex>> bucketMapLocker,
+                       std::shared_ptr<std::vector<std::vector<DocumentsPerBucket>>> allBuckets,
+                       std::shared_ptr<std::vector<std::shared_ptr<Inserter>>> inserters)
       : LocalTask(queue),
         _hashElement(hashElement),
         _contextDestroyer(contextDestroyer),
@@ -191,14 +185,13 @@ class MultiPartitionerTask : public LocalTask {
         _inserters(inserters),
         _bucketsMask(_allBuckets->size() - 1) {}
 
-  void run() {
+  void run() override {
     try {
       std::vector<DocumentsPerBucket> partitions;
-      partitions.resize(
-          _allBuckets->size());  // initialize to number of buckets
+      partitions.resize(_allBuckets->size());  // initialize to number of buckets
 
       for (size_t i = _lower; i < _upper; ++i) {
-        uint64_t hashByKey = _hashElement(_userData, (*_elements)[i], true);
+        uint64_t hashByKey = _hashElement((*_elements)[i], true);
         auto bucketId = hashByKey & _bucketsMask;
 
         partitions[bucketId].emplace_back((*_elements)[i], hashByKey);
@@ -225,7 +218,7 @@ class MultiPartitionerTask : public LocalTask {
   }
 };
 
-}  // namespace arangodb::basics
+}  // namespace basics
 }  // namespace arangodb
 
 #endif

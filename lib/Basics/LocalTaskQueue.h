@@ -30,7 +30,6 @@
 #include "Basics/Common.h"
 #include "Basics/ConditionVariable.h"
 #include "Basics/Mutex.h"
-#include "Basics/asio-helper.h"
 
 namespace arangodb {
 namespace basics {
@@ -57,14 +56,14 @@ class LocalTask : public std::enable_shared_from_this<LocalTask> {
   std::shared_ptr<LocalTaskQueue> _queue;
 };
 
-class LocalCallbackTask
-    : public std::enable_shared_from_this<LocalCallbackTask> {
+class LocalCallbackTask : public std::enable_shared_from_this<LocalCallbackTask> {
  public:
   LocalCallbackTask() = delete;
   LocalCallbackTask(LocalCallbackTask const&) = delete;
   LocalCallbackTask& operator=(LocalCallbackTask const&) = delete;
 
-  LocalCallbackTask(std::shared_ptr<LocalTaskQueue> const& queue, std::function<void()> const& cb);
+  LocalCallbackTask(std::shared_ptr<LocalTaskQueue> const& queue,
+                    std::function<void()> const& cb);
   virtual ~LocalCallbackTask() {}
 
   virtual void run();
@@ -197,7 +196,7 @@ class LocalTaskQueue {
   int _status;
 };
 
-}  // namespace arangodb::basics
+}  // namespace basics
 }  // namespace arangodb
 
 #endif

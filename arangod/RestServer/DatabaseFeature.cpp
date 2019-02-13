@@ -45,23 +45,20 @@
 #include "Replication/ReplicationFeature.h"
 #include "RestServer/DatabaseFeature.h"
 #include "RestServer/DatabasePathFeature.h"
-#include "RestServer/FeatureCacheFeature.h"
 #include "RestServer/QueryRegistryFeature.h"
 #include "RestServer/TraverserEngineRegistryFeature.h"
 #include "StorageEngine/EngineSelectorFeature.h"
 #include "StorageEngine/StorageEngine.h"
 #include "Utils/CollectionNameResolver.h"
-#include "Utils/Events.h"
 #include "Utils/CursorRepository.h"
 #include "Utils/Events.h"
 #include "V8Server/V8DealerFeature.h"
 #include "V8Server/v8-query.h"
 #include "V8Server/v8-vocbase.h"
-#include "VocBase/AuthInfo.h"
 #include "VocBase/KeyGenerator.h"
 #include "VocBase/LogicalCollection.h"
-#include "VocBase/vocbase.h"
 #include "VocBase/ticks.h"
+#include "VocBase/vocbase.h"
 
 #include <velocypack/velocypack-aliases.h>
 
@@ -118,7 +115,6 @@ void DatabaseManagerThread::run() {
           try {
             newLists = new DatabasesLists();
             newLists->_databases = oldLists->_databases;
-            newLists->_coordinatorDatabases = oldLists->_coordinatorDatabases;
             for (TRI_vocbase_t* vocbase : oldLists->_droppedDatabases) {
               if (vocbase != database) {
                 newLists->_droppedDatabases.insert(vocbase);
@@ -156,26 +152,30 @@ void DatabaseManagerThread::run() {
                 database->name());
 
             if (TRI_IsDirectory(path.c_str())) {
-              LOG_TOPIC(TRACE, arangodb::Logger::FIXME) << "removing app directory '" << path
-                         << "' of database '" << database->name() << "'";
+              LOG_TOPIC(TRACE, arangodb::Logger::FIXME)
+                  << "removing app directory '" << path << "' of database '"
+                  << database->name() << "'";
 
               TRI_RemoveDirectory(path.c_str());
             }
           }
 
           try {
-            engine->dropDatabase(database);
+            engine->dropDatabase(*database);
           } catch (std::exception const& ex) {
-            LOG_TOPIC(ERR, Logger::FIXME) << "dropping database '" << database->name() << "' failed: " << ex.what();
+            LOG_TOPIC(ERR, Logger::FIXME) << "dropping database '" << database->name()
+                                          << "' failed: " << ex.what();
           } catch (...) {
-            LOG_TOPIC(ERR, Logger::FIXME) << "dropping database '" << database->name() << "' failed";
+            LOG_TOPIC(ERR, Logger::FIXME)
+                << "dropping database '" << database->name() << "' failed";
           }
         }
 
         delete database;
 
         // directly start next iteration
-      } else {
+      } else {  // if (database != nullptr)
+        // perfom some cleanup tasks
         if (isStopping()) {
           // done
           break;
@@ -184,37 +184,33 @@ void DatabaseManagerThread::run() {
         std::this_thread::sleep_for(std::chrono::microseconds(waitTime()));
 
         // The following is only necessary after a wait:
-        auto queryRegistry = QueryRegistryFeature::QUERY_REGISTRY;
+        auto queryRegistry = QueryRegistryFeature::registry();
         if (queryRegistry != nullptr) {
           queryRegistry->expireQueries();
         }
 
-        auto engineRegistry
-          = TraverserEngineRegistryFeature::TRAVERSER_ENGINE_REGISTRY;
+        auto engineRegistry = TraverserEngineRegistryFeature::registry();
         if (engineRegistry != nullptr) {
           engineRegistry->expireEngines();
         }
 
-        // on a coordinator, we have no cleanup threads for the databases
-        // so we have to do cursor cleanup here
-        if (++cleanupCycles >= 10 &&
-            arangodb::ServerState::instance()->isCoordinator()) {
-          // note: if no coordinator then cleanupCycles will increase endlessly,
-          // but it's only used for the following part
+        // perform cursor cleanup here
+        if (++cleanupCycles >= 10) {
           cleanupCycles = 0;
 
           auto unuser(databaseFeature->_databasesProtector.use());
           auto theLists = databaseFeature->_databasesLists.load();
 
-          for (auto& p : theLists->_coordinatorDatabases) {
+          bool force = isStopping();
+          for (auto& p : theLists->_databases) {
             TRI_vocbase_t* vocbase = p.second;
             TRI_ASSERT(vocbase != nullptr);
-            auto cursorRepository = vocbase->cursorRepository();
 
             try {
-              cursorRepository->garbageCollect(false);
+              vocbase->cursorRepository()->garbageCollect(force);
             } catch (...) {
             }
+            vocbase->garbageCollectReplicationClients(TRI_microtime());
           }
         }
       }
@@ -226,34 +222,35 @@ void DatabaseManagerThread::run() {
   }
 }
 
-DatabaseFeature::DatabaseFeature(ApplicationServer* server)
+DatabaseFeature::DatabaseFeature(application_features::ApplicationServer& server)
     : ApplicationFeature(server, "Database"),
       _maximalJournalSize(TRI_JOURNAL_DEFAULT_SIZE),
       _defaultWaitForSync(false),
       _forceSyncProperties(true),
       _ignoreDatafileErrors(false),
-      _check30Revisions("true"),
       _throwCollectionNotLoadedError(false),
-      _vocbase(nullptr),
       _databasesLists(new DatabasesLists()),
       _isInitiallyEmpty(false),
       _checkVersion(false),
       _upgrade(false) {
   setOptional(false);
-  requiresElevatedPrivileges(false);
+  startsAfter("BasicsPhase");
+
   startsAfter("Authentication");
   startsAfter("CacheManager");
-  startsAfter("DatabasePath");
   startsAfter("EngineSelector");
   startsAfter("InitDatabase");
-  startsAfter("Scheduler");
   startsAfter("StorageEngine");
+
+  DATABASE = nullptr;
 }
 
 DatabaseFeature::~DatabaseFeature() {
   // clean up
   auto p = _databasesLists.load();
   delete p;
+
+  DATABASE = nullptr;
 }
 
 void DatabaseFeature::collectOptions(std::shared_ptr<ProgramOptions> options) {
@@ -264,64 +261,68 @@ void DatabaseFeature::collectOptions(std::shared_ptr<ProgramOptions> options) {
                      "creating a collection",
                      new UInt64Parameter(&_maximalJournalSize));
 
-  options->addHiddenOption("--database.wait-for-sync",
-                           "default wait-for-sync behavior, can be overwritten "
-                           "when creating a collection",
-                           new BooleanParameter(&_defaultWaitForSync));
+  options->addOption("--database.wait-for-sync",
+                     "default wait-for-sync behavior, can be overwritten "
+                     "when creating a collection",
+                     new BooleanParameter(&_defaultWaitForSync),
+                     arangodb::options::makeFlags(arangodb::options::Flags::Hidden));
 
-  options->addHiddenOption("--database.force-sync-properties",
-                           "force syncing of collection properties to disk, "
-                           "will use waitForSync value of collection when "
-                           "turned off",
-                           new BooleanParameter(&_forceSyncProperties));
+  options->addOption("--database.force-sync-properties",
+                     "force syncing of collection properties to disk, "
+                     "will use waitForSync value of collection when "
+                     "turned off",
+                     new BooleanParameter(&_forceSyncProperties),
+                     arangodb::options::makeFlags(arangodb::options::Flags::Hidden));
 
-  options->addHiddenOption(
-      "--database.ignore-datafile-errors",
-      "load collections even if datafiles may contain errors",
-      new BooleanParameter(&_ignoreDatafileErrors));
+  options->addOption("--database.ignore-datafile-errors",
+                     "load collections even if datafiles may contain errors",
+                     new BooleanParameter(&_ignoreDatafileErrors),
+                     arangodb::options::makeFlags(arangodb::options::Flags::Hidden));
 
-  options->addHiddenOption(
+  options->addOption(
       "--database.throw-collection-not-loaded-error",
       "throw an error when accessing a collection that is still loading",
-      new AtomicBooleanParameter(&_throwCollectionNotLoadedError));
-
-  options->addHiddenOption(
-      "--database.check-30-revisions",
-      "check _rev values in collections created before 3.1",
-      new DiscreteValuesParameter<StringParameter>(
-          &_check30Revisions,
-          std::unordered_set<std::string>{"true", "false", "fail"}));
+      new AtomicBooleanParameter(&_throwCollectionNotLoadedError),
+      arangodb::options::makeFlags(arangodb::options::Flags::Hidden));
 
   // the following option was removed in 3.2
-  // index-creation is now automatically parallelized via the Boost ASIO thread pool
+  // index-creation is now automatically parallelized via the Boost ASIO thread
+  // pool
   options->addObsoleteOption(
       "--database.index-threads",
       "threads to start for parallel background index creation", true);
 
+  // the following hidden option was removed in 3.4
+  options->addObsoleteOption(
+      "--database.check-30-revisions",
+      "check for revision values from ArangoDB 3.0 databases", true);
+
   // the following options were removed in 3.2
-  options->addObsoleteOption("--database.revision-cache-chunk-size",
+  options->addObsoleteOption(
+      "--database.revision-cache-chunk-size",
       "chunk size (in bytes) for the document revisions cache", true);
-  options->addObsoleteOption("--database.revision-cache-target-size",
+  options->addObsoleteOption(
+      "--database.revision-cache-target-size",
       "total target size (in bytes) for the document revisions cache", true);
 }
 
 void DatabaseFeature::validateOptions(std::shared_ptr<ProgramOptions> options) {
   if (_maximalJournalSize < TRI_JOURNAL_MINIMAL_SIZE) {
-    LOG_TOPIC(FATAL, arangodb::Logger::FIXME) << "invalid value for '--database.maximal-journal-size'. "
-                  "expected at least "
-               << TRI_JOURNAL_MINIMAL_SIZE;
+    LOG_TOPIC(FATAL, arangodb::Logger::FIXME)
+        << "invalid value for '--database.maximal-journal-size'. "
+           "expected at least "
+        << TRI_JOURNAL_MINIMAL_SIZE;
     FATAL_ERROR_EXIT();
   }
 
   // sanity check
   if (_checkVersion && _upgrade) {
-    LOG_TOPIC(FATAL, arangodb::Logger::FIXME) << "cannot specify both '--database.check-version' and "
-                  "'--database.auto-upgrade'";
+    LOG_TOPIC(FATAL, arangodb::Logger::FIXME)
+        << "cannot specify both '--database.check-version' and "
+           "'--database.auto-upgrade'";
     FATAL_ERROR_EXIT();
   }
 }
-
-void DatabaseFeature::prepare() {}
 
 void DatabaseFeature::start() {
   // set singleton
@@ -339,12 +340,12 @@ void DatabaseFeature::start() {
   int res = iterateDatabases(builder.slice());
 
   if (res != TRI_ERROR_NO_ERROR) {
-    LOG_TOPIC(FATAL, arangodb::Logger::FIXME) << "could not iterate over all databases: "
-               << TRI_errno_string(res);
+    LOG_TOPIC(FATAL, arangodb::Logger::FIXME)
+        << "could not iterate over all databases: " << TRI_errno_string(res);
     FATAL_ERROR_EXIT();
   }
 
-  if (systemDatabase() == nullptr) {
+  if (!lookupDatabase(TRI_VOC_SYSTEM_DATABASE)) {
     LOG_TOPIC(FATAL, arangodb::Logger::FIXME)
         << "No _system database found in database directory. Cannot start!";
     FATAL_ERROR_EXIT();
@@ -354,7 +355,8 @@ void DatabaseFeature::start() {
   _databaseManager.reset(new DatabaseManagerThread);
 
   if (!_databaseManager->start()) {
-    LOG_TOPIC(FATAL, arangodb::Logger::FIXME) << "could not start database manager thread";
+    LOG_TOPIC(FATAL, arangodb::Logger::FIXME)
+        << "could not start database manager thread";
     FATAL_ERROR_EXIT();
   }
 
@@ -378,7 +380,6 @@ void DatabaseFeature::beginShutdown() {
     TRI_vocbase_t* vocbase = p.second;
     // iterate over all databases
     TRI_ASSERT(vocbase != nullptr);
-    TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_NORMAL);
 
     // throw away all open cursors in order to speed up shutdown
     vocbase->cursorRepository()->garbageCollect(true);
@@ -386,6 +387,8 @@ void DatabaseFeature::beginShutdown() {
 }
 
 void DatabaseFeature::stop() {
+  stopAppliers();
+
   auto unuser(_databasesProtector.use());
   auto theLists = _databasesLists.load();
 
@@ -393,21 +396,22 @@ void DatabaseFeature::stop() {
     TRI_vocbase_t* vocbase = p.second;
     // iterate over all databases
     TRI_ASSERT(vocbase != nullptr);
-    TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_NORMAL);
+    if (vocbase->type() != TRI_VOCBASE_TYPE_NORMAL) {
+      continue;
+    }
 
-    vocbase->processCollections([](LogicalCollection* collection) { 
-      // no one else must modify the collection's status while we are in here
-      collection->executeWhileStatusWriteLocked([collection]() {
-        collection->close(); 
-      });
-    }, true);
+    vocbase->processCollections(
+        [](LogicalCollection* collection) {
+          // no one else must modify the collection's status while we are in
+          // here
+          collection->executeWhileStatusWriteLocked(
+              [collection]() { collection->close(); });
+        },
+        true);
   }
 }
 
 void DatabaseFeature::unprepare() {
-  // close all databases
-  closeDatabases();
-
   // delete the database manager thread
   if (_databaseManager != nullptr) {
     _databaseManager->beginShutdown();
@@ -444,17 +448,18 @@ void DatabaseFeature::recoveryDone() {
 
   TRI_ASSERT(engine && !engine->inRecovery());
 
-  // '_pendingRecoveryCallbacks' will not change because !StorageEngine.inRecovery()
-  for (auto& entry: _pendingRecoveryCallbacks) {
+  // '_pendingRecoveryCallbacks' will not change because
+  // !StorageEngine.inRecovery()
+  for (auto& entry : _pendingRecoveryCallbacks) {
     auto result = entry();
 
     if (!result.ok()) {
       LOG_TOPIC(ERR, arangodb::Logger::FIXME)
-                << "recovery failure due to error from callback, error '"
-                << TRI_errno_string(result.errorNumber()) << "' message: "
-                << result.errorMessage();
+          << "recovery failure due to error from callback, error '"
+          << TRI_errno_string(result.errorNumber())
+          << "' message: " << result.errorMessage();
 
-      THROW_ARANGO_EXCEPTION_MESSAGE(result.errorNumber(), result.errorMessage());
+      THROW_ARANGO_EXCEPTION(result);
     }
   }
 
@@ -467,27 +472,29 @@ void DatabaseFeature::recoveryDone() {
     TRI_vocbase_t* vocbase = p.second;
     // iterate over all databases
     TRI_ASSERT(vocbase != nullptr);
-    TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_NORMAL);
+    if (vocbase->type() != TRI_VOCBASE_TYPE_NORMAL) {
+      continue;
+    }
 
     // execute the engine-specific callbacks on successful recovery
-    engine->recoveryDone(vocbase);
+    engine->recoveryDone(*vocbase);
 
-    ReplicationFeature* replicationFeature =
-        static_cast<ReplicationFeature*>(ApplicationServer::lookupFeature("Replication"));
+    if (vocbase->replicationApplier()) {
+      ReplicationFeature* replicationFeature = static_cast<ReplicationFeature*>(
+          ApplicationServer::lookupFeature("Replication"));
 
-    if (replicationFeature != nullptr) {
-      replicationFeature->startApplier(vocbase);
+      if (replicationFeature != nullptr) {
+        replicationFeature->startApplier(vocbase);
+      }
     }
   }
 }
 
-Result DatabaseFeature::registerPostRecoveryCallback(
-    std::function<Result()>&& callback
-) {
+Result DatabaseFeature::registerPostRecoveryCallback(std::function<Result()>&& callback) {
   StorageEngine* engine = EngineSelectorFeature::ENGINE;
 
   if (!engine || !engine->inRecovery()) {
-    return callback(); // if no engine then can't be in recovery
+    return callback();  // if no engine then can't be in recovery
   }
 
   // do not need a lock since single-thread access during recovery
@@ -497,75 +504,17 @@ Result DatabaseFeature::registerPostRecoveryCallback(
 }
 
 /// @brief create a new database
-int DatabaseFeature::createDatabaseCoordinator(TRI_voc_tick_t id,
-                                               std::string const& name,
-                                               TRI_vocbase_t*& result) {
-  result = nullptr;
-
-  if (!TRI_vocbase_t::IsAllowedName(true, name)) {
-    events::CreateDatabase(name, TRI_ERROR_ARANGO_DATABASE_NAME_INVALID);
-    return TRI_ERROR_ARANGO_DATABASE_NAME_INVALID;
-  }
-
-  MUTEX_LOCKER(mutexLocker, _databaseCreateLock);
-
-  {
-    auto unuser(_databasesProtector.use());
-    auto theLists = _databasesLists.load();
-
-    auto it = theLists->_coordinatorDatabases.find(name);
-    if (it != theLists->_coordinatorDatabases.end()) {
-      // name already in use
-      events::CreateDatabase(name, TRI_ERROR_ARANGO_DUPLICATE_NAME);
-      return TRI_ERROR_ARANGO_DUPLICATE_NAME;
-    }
-  }
-
-  // name not yet in use, release the read lock
-  auto vocbase =
-      std::make_unique<TRI_vocbase_t>(TRI_VOCBASE_TYPE_COORDINATOR, id, name);
-
-  try {
-    vocbase->addReplicationApplier();
-  } catch (...) {
-    return TRI_ERROR_OUT_OF_MEMORY;
-  }
-
-  // increase reference counter
-  vocbase->use();
-
-  {
-    MUTEX_LOCKER(mutexLocker, _databasesMutex);
-    auto oldLists = _databasesLists.load();
-    decltype(oldLists) newLists = nullptr;
-    try {
-      newLists = new DatabasesLists(*oldLists);
-      newLists->_coordinatorDatabases.emplace(name, vocbase.get());
-    } catch (...) {
-      delete newLists;
-      return TRI_ERROR_OUT_OF_MEMORY;
-    }
-    _databasesLists = newLists;
-    _databasesProtector.scan();
-    delete oldLists;
-  }
-
-  result = vocbase.release();
-  events::CreateDatabase(name, TRI_ERROR_NO_ERROR);
-  return TRI_ERROR_NO_ERROR;
-}
-
-/// @brief create a new database
 int DatabaseFeature::createDatabase(TRI_voc_tick_t id, std::string const& name,
                                     TRI_vocbase_t*& result) {
   result = nullptr;
 
-  if (!TRI_vocbase_t::IsAllowedName(false, name)) {
+  if (!TRI_vocbase_t::IsAllowedName(false, arangodb::velocypack::StringRef(name))) {
     events::CreateDatabase(name, TRI_ERROR_ARANGO_DATABASE_NAME_INVALID);
     return TRI_ERROR_ARANGO_DATABASE_NAME_INVALID;
   }
 
   if (id == 0) {
+    TRI_ASSERT(!ServerState::instance()->isCoordinator());
     id = TRI_NewTickServer();
   }
 
@@ -574,6 +523,7 @@ int DatabaseFeature::createDatabase(TRI_voc_tick_t id, std::string const& name,
 
   // create database in storage engine
   StorageEngine* engine = EngineSelectorFeature::ENGINE;
+  TRI_ASSERT(engine != nullptr);
 
   // the create lock makes sure no one else is creating a database while we're
   // inside
@@ -599,47 +549,53 @@ int DatabaseFeature::createDatabase(TRI_voc_tick_t id, std::string const& name,
     builder.close();
 
     // createDatabase must return a valid database or throw
-    vocbase.reset(engine->createDatabase(id, builder.slice()));
-
+    int status = TRI_ERROR_NO_ERROR;
+    vocbase = engine->createDatabase(id, builder.slice(), status);
+    TRI_ASSERT(status == TRI_ERROR_NO_ERROR);
     TRI_ASSERT(vocbase != nullptr);
 
-    try {
-      vocbase->addReplicationApplier();
-    } catch (basics::Exception const& ex) {
-      LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "initializing replication applier for database '"
-                                              << vocbase->name() << "' failed: " << ex.what();
-      return ex.code();
-    } catch (std::exception const& ex) {
-      LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "initializing replication applier for database '"
-                                              << vocbase->name() << "' failed: " << ex.what();
-      return TRI_ERROR_INTERNAL;
+    if (vocbase->type() == TRI_VOCBASE_TYPE_NORMAL) {
+      try {
+        vocbase->addReplicationApplier();
+      } catch (basics::Exception const& ex) {
+        LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+            << "initializing replication applier for database '"
+            << vocbase->name() << "' failed: " << ex.what();
+        return ex.code();
+      } catch (std::exception const& ex) {
+        LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+            << "initializing replication applier for database '"
+            << vocbase->name() << "' failed: " << ex.what();
+        return TRI_ERROR_INTERNAL;
+      }
+
+      // enable deadlock detection
+      vocbase->_deadlockDetector.enabled(!ServerState::instance()->isRunningInCluster());
+
+      // FIXME why do we not n this
+      // create application directories
+      V8DealerFeature* dealer =
+          ApplicationServer::getFeature<V8DealerFeature>("V8Dealer");
+      auto appPath = dealer->appPath();
+
+      // create app directory for database if it does not exist
+      int res = createApplicationDirectory(name, appPath);
+
+      if (res != TRI_ERROR_NO_ERROR) {
+        THROW_ARANGO_EXCEPTION(res);
+      }
     }
 
-    // enable deadlock detection
-    vocbase->_deadlockDetector.enabled(
-        !arangodb::ServerState::instance()->isRunningInCluster());
-
-    // create application directories
-    V8DealerFeature* dealer =
-        ApplicationServer::getFeature<V8DealerFeature>("V8Dealer");
-    auto appPath = dealer->appPath();
-
-    // create app directory for database if it does not exist
-    int res = createApplicationDirectory(name, appPath);
-
-    if (res != TRI_ERROR_NO_ERROR) {
-      THROW_ARANGO_EXCEPTION(res);
-    }
-
-    if (! engine->inRecovery()) {
+    if (!engine->inRecovery()) {
       // starts compactor etc.
-      engine->recoveryDone(vocbase.get());
-    
-      ReplicationFeature* replicationFeature =
-        static_cast<ReplicationFeature*>(ApplicationServer::lookupFeature("Replication"));
+      engine->recoveryDone(*vocbase);
 
-      if (replicationFeature != nullptr) {
-        replicationFeature->startApplier(vocbase.get());
+      if (vocbase->type() == TRI_VOCBASE_TYPE_NORMAL) {
+        ReplicationFeature* replicationFeature = static_cast<ReplicationFeature*>(
+            ApplicationServer::lookupFeature("Replication"));
+        if (replicationFeature != nullptr) {
+          replicationFeature->startApplier(vocbase.get());
+        }
       }
 
       // increase reference counter
@@ -655,7 +611,8 @@ int DatabaseFeature::createDatabase(TRI_voc_tick_t id, std::string const& name,
         newLists = new DatabasesLists(*oldLists);
         newLists->_databases.insert(std::make_pair(name, vocbase.get()));
       } catch (...) {
-        LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "Out of memory for putting new database into list!";
+        LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+            << "Out of memory for putting new database into list!";
         // This is bad, but at least we do not crash!
       }
       if (newLists != nullptr) {
@@ -676,50 +633,11 @@ int DatabaseFeature::createDatabase(TRI_voc_tick_t id, std::string const& name,
   result = vocbase.release();
   events::CreateDatabase(name, res);
 
-  return res;
-}
-
-/// @brief drop coordinator database
-int DatabaseFeature::dropDatabaseCoordinator(TRI_voc_tick_t id, bool force) {
-  int res = TRI_ERROR_ARANGO_DATABASE_NOT_FOUND;
-
-  MUTEX_LOCKER(mutexLocker, _databasesMutex);
-  auto oldLists = _databasesLists.load();
-  decltype(oldLists) newLists = nullptr;
-  TRI_vocbase_t* vocbase = nullptr;
-  try {
-    newLists = new DatabasesLists(*oldLists);
-
-    for (auto it = newLists->_coordinatorDatabases.begin();
-         it != newLists->_coordinatorDatabases.end(); it++) {
-      vocbase = it->second;
-
-      if (vocbase->id() == id &&
-          (force || vocbase->name() != TRI_VOC_SYSTEM_DATABASE)) {
-        newLists->_droppedDatabases.emplace(vocbase);
-        newLists->_coordinatorDatabases.erase(it);
-        break;
-      }
-      vocbase = nullptr;
-    }
-  } catch (...) {
-    delete newLists;
-    return TRI_ERROR_OUT_OF_MEMORY;
-  }
-  if (vocbase != nullptr) {
-    _databasesLists = newLists;
-    _databasesProtector.scan();
-    delete oldLists;
-
-    if (vocbase->markAsDropped()) {
-      LOG_TOPIC(INFO, arangodb::Logger::FIXME) << "dropping coordinator database '" << vocbase->name() << "'";
-      res = TRI_ERROR_NO_ERROR;
-    }
-  } else {
-    delete newLists;
+  if (DatabaseFeature::DATABASE != nullptr &&
+      DatabaseFeature::DATABASE->versionTracker() != nullptr) {
+    DatabaseFeature::DATABASE->versionTracker()->track("create database");
   }
 
-  events::DropDatabase(vocbase == nullptr ? "" : vocbase->name(), res);
   return res;
 }
 
@@ -733,7 +651,7 @@ int DatabaseFeature::dropDatabase(std::string const& name, bool waitForDeletion,
 
   StorageEngine* engine = EngineSelectorFeature::ENGINE;
   TRI_voc_tick_t id = 0;
-  int res;
+  int res = TRI_ERROR_NO_ERROR;
   {
     MUTEX_LOCKER(mutexLocker, _databasesMutex);
 
@@ -744,20 +662,49 @@ int DatabaseFeature::dropDatabase(std::string const& name, bool waitForDeletion,
       newLists = new DatabasesLists(*oldLists);
 
       auto it = newLists->_databases.find(name);
+
       if (it == newLists->_databases.end()) {
         // not found
         delete newLists;
         events::DropDatabase(name, TRI_ERROR_ARANGO_DATABASE_NOT_FOUND);
         return TRI_ERROR_ARANGO_DATABASE_NOT_FOUND;
-      } else {
-        vocbase = it->second;
-        id = vocbase->id();
-        // mark as deleted
-        TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_NORMAL);
-
-        newLists->_databases.erase(it);
-        newLists->_droppedDatabases.insert(vocbase);
       }
+
+      vocbase = it->second;
+      id = vocbase->id();
+      // mark as deleted
+
+      // call LogicalDataSource::drop() to allow instances to clean up internal
+      // state (e.g. for LogicalView implementations)
+      TRI_vocbase_t::dataSourceVisitor visitor =
+          [&res, &vocbase](arangodb::LogicalDataSource& dataSource) -> bool {
+        // skip LogicalCollection since their internal state is always in the
+        // StorageEngine (optimization)
+        if (arangodb::LogicalCollection::category() == dataSource.category()) {
+          return true;
+        }
+
+        auto result = dataSource.drop();
+
+        if (!result.ok()) {
+          res = result.errorNumber();
+          LOG_TOPIC(FATAL, arangodb::Logger::FIXME)
+              << "failed to drop DataSource '" << dataSource.name()
+              << "' while dropping database '" << vocbase->name()
+              << "': " << result.errorNumber() << " " << result.errorMessage();
+        }
+
+        return true;  // try next DataSource
+      };
+
+      vocbase->visitDataSources(visitor, true);  // aquire a write lock to avoid potential deadlocks
+
+      if (TRI_ERROR_NO_ERROR != res) {
+        return res;
+      }
+
+      newLists->_databases.erase(it);
+      newLists->_droppedDatabases.insert(vocbase);
     } catch (...) {
       delete newLists;
       return TRI_ERROR_OUT_OF_MEMORY;
@@ -782,7 +729,7 @@ int DatabaseFeature::dropDatabase(std::string const& name, bool waitForDeletion,
 #endif
     arangodb::aql::QueryCache::instance()->invalidate(vocbase);
 
-    engine->prepareDropDatabase(vocbase, !engine->inRecovery(), res);
+    engine->prepareDropDatabase(*vocbase, !engine->inRecovery(), res);
   }
   // must not use the database after here, as it may now be
   // deleted by the DatabaseManagerThread!
@@ -792,6 +739,12 @@ int DatabaseFeature::dropDatabase(std::string const& name, bool waitForDeletion,
   }
 
   events::DropDatabase(name, res);
+
+  if (DatabaseFeature::DATABASE != nullptr &&
+      DatabaseFeature::DATABASE->versionTracker() != nullptr) {
+    DatabaseFeature::DATABASE->versionTracker()->track("drop database");
+  }
+
   return res;
 }
 
@@ -815,32 +768,14 @@ int DatabaseFeature::dropDatabase(TRI_voc_tick_t id, bool waitForDeletion,
     }
   }
 
+  if (name.empty()) {
+    return TRI_ERROR_ARANGO_DATABASE_NOT_FOUND;
+  }
   // and call the regular drop function
   return dropDatabase(name, waitForDeletion, removeAppsDirectory);
 }
 
-std::vector<TRI_voc_tick_t> DatabaseFeature::getDatabaseIdsCoordinator(
-    bool includeSystem) {
-  std::vector<TRI_voc_tick_t> ids;
-  {
-    auto unuser(_databasesProtector.use());
-    auto theLists = _databasesLists.load();
-
-    for (auto& p : theLists->_coordinatorDatabases) {
-      TRI_vocbase_t* vocbase = p.second;
-      TRI_ASSERT(vocbase != nullptr);
-
-      if (includeSystem || vocbase->name() != TRI_VOC_SYSTEM_DATABASE) {
-        ids.emplace_back(vocbase->id());
-      }
-    }
-  }
-
-  return ids;
-}
-
-std::vector<TRI_voc_tick_t> DatabaseFeature::getDatabaseIds(
-    bool includeSystem) {
+std::vector<TRI_voc_tick_t> DatabaseFeature::getDatabaseIds(bool includeSystem) {
   std::vector<TRI_voc_tick_t> ids;
 
   {
@@ -860,31 +795,6 @@ std::vector<TRI_voc_tick_t> DatabaseFeature::getDatabaseIds(
   }
 
   return ids;
-}
-
-/// @brief return the list of all database names
-std::vector<std::string> DatabaseFeature::getDatabaseNamesCoordinator() {
-  std::vector<std::string> names;
-
-  {
-    auto unuser(_databasesProtector.use());
-    auto theLists = _databasesLists.load();
-
-    for (auto& p : theLists->_coordinatorDatabases) {
-      TRI_vocbase_t* vocbase = p.second;
-      TRI_ASSERT(vocbase != nullptr);
-      if (vocbase->isDropped()) {
-        continue;
-      }
-      names.emplace_back(vocbase->name());
-    }
-  }
-
-  std::sort(
-      names.begin(), names.end(),
-      [](std::string const& l, std::string const& r) -> bool { return l < r; });
-
-  return names;
 }
 
 /// @brief return the list of all database names
@@ -905,19 +815,18 @@ std::vector<std::string> DatabaseFeature::getDatabaseNames() {
     }
   }
 
-  std::sort(
-      names.begin(), names.end(),
-      [](std::string const& l, std::string const& r) -> bool { return l < r; });
+  std::sort(names.begin(), names.end(), [](std::string const& l, std::string const& r) -> bool {
+    return l < r;
+  });
 
   return names;
 }
 
 /// @brief return the list of all database names for a user
-std::vector<std::string> DatabaseFeature::getDatabaseNamesForUser(
-    std::string const& username) {
+std::vector<std::string> DatabaseFeature::getDatabaseNamesForUser(std::string const& username) {
   std::vector<std::string> names;
 
-  auto authentication = FeatureCacheFeature::instance()->authenticationFeature();
+  AuthenticationFeature* af = AuthenticationFeature::instance();
   {
     auto unuser(_databasesProtector.use());
     auto theLists = _databasesLists.load();
@@ -929,9 +838,9 @@ std::vector<std::string> DatabaseFeature::getDatabaseNamesForUser(
         continue;
       }
 
-      if (authentication->isActive()) {
-        auto level = authentication->authInfo()->canUseDatabase(username, vocbase->name());
-        if (level == AuthLevel::NONE) {
+      if (af->isActive() && af->userManager() != nullptr) {
+        auto level = af->userManager()->databaseAuthLevel(username, vocbase->name());
+        if (level == auth::Level::NONE) {  // hide dbs without access
           continue;
         }
       }
@@ -940,16 +849,15 @@ std::vector<std::string> DatabaseFeature::getDatabaseNamesForUser(
     }
   }
 
-  std::sort(
-      names.begin(), names.end(),
-      [](std::string const& l, std::string const& r) -> bool { return l < r; });
+  std::sort(names.begin(), names.end(), [](std::string const& l, std::string const& r) -> bool {
+    return l < r;
+  });
 
   return names;
 }
 
 /// @brief return the list of all database names
-void DatabaseFeature::inventory(VPackBuilder& result,
-                                TRI_voc_tick_t maxTick, 
+void DatabaseFeature::inventory(VPackBuilder& result, TRI_voc_tick_t maxTick,
                                 std::function<bool(arangodb::LogicalCollection const*)> const& nameFilter) {
   result.openObject();
   {
@@ -963,57 +871,14 @@ void DatabaseFeature::inventory(VPackBuilder& result,
         continue;
       }
 
-      result.add(VPackValue(vocbase->name()));
-      result.add(VPackValue(VPackValueType::Object));
+      result.add(vocbase->name(), VPackValue(VPackValueType::Object));
       result.add("id", VPackValue(std::to_string(vocbase->id())));
       result.add("name", VPackValue(vocbase->name()));
-      result.add(VPackValue("collections"));
       vocbase->inventory(result, maxTick, nameFilter);
       result.close();
     }
   }
   result.close();
-}
-
-void DatabaseFeature::useSystemDatabase() {
-  TRI_vocbase_t* result = useDatabase(TRI_VOC_SYSTEM_DATABASE);
-  TRI_ASSERT(result != nullptr);
-}
-
-/// @brief get a coordinator database by its id
-/// this will increase the reference-counter for the database
-TRI_vocbase_t* DatabaseFeature::useDatabaseCoordinator(TRI_voc_tick_t id) {
-  auto unuser(_databasesProtector.use());
-  auto theLists = _databasesLists.load();
-
-  for (auto& p : theLists->_coordinatorDatabases) {
-    TRI_vocbase_t* vocbase = p.second;
-
-    if (vocbase->id() == id) {
-      bool result = vocbase->use();
-
-      // if we got here, no one else can have deleted the database
-      TRI_ASSERT(result == true);
-      return vocbase;
-    }
-  }
-  return nullptr;
-}
-
-TRI_vocbase_t* DatabaseFeature::useDatabaseCoordinator(
-    std::string const& name) {
-  auto unuser(_databasesProtector.use());
-  auto theLists = _databasesLists.load();
-
-  auto it = theLists->_coordinatorDatabases.find(name);
-
-  if (it != theLists->_coordinatorDatabases.end()) {
-    TRI_vocbase_t* vocbase = it->second;
-    vocbase->use();
-    return vocbase;
-  }
-
-  return nullptr;
 }
 
 TRI_vocbase_t* DatabaseFeature::useDatabase(std::string const& name) {
@@ -1051,33 +916,18 @@ TRI_vocbase_t* DatabaseFeature::useDatabase(TRI_voc_tick_t id) {
 }
 
 /// @brief lookup a database by its name, not increasing its reference count
-TRI_vocbase_t* DatabaseFeature::lookupDatabaseCoordinator(
-    std::string const& name) {
-  auto unuser(_databasesProtector.use());
-  auto theLists = _databasesLists.load();
-
-  auto it = theLists->_coordinatorDatabases.find(name);
-
-  if (it != theLists->_coordinatorDatabases.end()) {
-    TRI_vocbase_t* vocbase = it->second;
-    return vocbase;
-  }
-
-  return nullptr;
-}
-
-/// @brief lookup a database by its name, not increasing its reference count
 TRI_vocbase_t* DatabaseFeature::lookupDatabase(std::string const& name) {
   if (name.empty()) {
     return nullptr;
   }
-  
+
   auto unuser(_databasesProtector.use());
   auto theLists = _databasesLists.load();
-  
+
   // database names with a number in front are invalid names
   if (name[0] >= '0' && name[0] <= '9') {
-    TRI_voc_tick_t id = NumberUtils::atoi_zero<TRI_voc_tick_t>(name.data(), name.data() + name.size());
+    TRI_voc_tick_t id =
+        NumberUtils::atoi_zero<TRI_voc_tick_t>(name.data(), name.data() + name.size());
     for (auto& p : theLists->_databases) {
       TRI_vocbase_t* vocbase = p.second;
       if (vocbase->id() == id) {
@@ -1096,96 +946,77 @@ TRI_vocbase_t* DatabaseFeature::lookupDatabase(std::string const& name) {
   return nullptr;
 }
 
-std::string DatabaseFeature::translateCollectionName(std::string const& dbName, std::string const& collectionName) {
-  if (ServerState::instance()->isCoordinator()) {
-    auto unuser(_databasesProtector.use());
-    auto theLists = _databasesLists.load();
-    
-    auto it = theLists->_coordinatorDatabases.find(dbName);
-    if (it == theLists->_coordinatorDatabases.end()) {
-      return std::string();
-    }
-      
-    TRI_vocbase_t* vocbase = (*it).second;
-    TRI_ASSERT(vocbase != nullptr);
-    TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_COORDINATOR);
+std::string DatabaseFeature::translateCollectionName(std::string const& dbName,
+                                                     std::string const& collectionName) {
+  auto unuser(_databasesProtector.use());
+  auto theLists = _databasesLists.load();
+  auto itr = theLists->_databases.find(dbName);
 
-    CollectionNameResolver resolver(vocbase);
-    return resolver.getCollectionNameCluster(NumberUtils::atoi_zero<TRI_voc_cid_t>(collectionName.data(), collectionName.data() + collectionName.size()));
+  if (itr == theLists->_databases.end()) {
+    return std::string();
+  }
+
+  auto* vocbase = itr->second;
+  TRI_ASSERT(vocbase != nullptr);
+
+  if (ServerState::instance()->isCoordinator()) {
+    TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_COORDINATOR);
+    CollectionNameResolver resolver(*vocbase);
+
+    return resolver.getCollectionNameCluster(NumberUtils::atoi_zero<TRI_voc_cid_t>(
+        collectionName.data(), collectionName.data() + collectionName.size()));
   } else {
-    auto unuser(_databasesProtector.use());
-    auto theLists = _databasesLists.load();
-    
-    auto it = theLists->_databases.find(dbName);
-    if (it == theLists->_databases.end()) {
-      return std::string();
-    }
-    
-    TRI_vocbase_t* vocbase = (*it).second;
-    TRI_ASSERT(vocbase != nullptr);
     TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_NORMAL);
-    return vocbase->collectionName(NumberUtils::atoi_zero<uint64_t>(collectionName.data(), collectionName.data() + collectionName.size()));
+    auto collection = vocbase->lookupCollection(collectionName);
+
+    return collection ? collection->name() : std::string();
   }
 }
 
-void DatabaseFeature::enumerateDatabases(std::function<void(TRI_vocbase_t*)> func) {
-  if (ServerState::instance()->isCoordinator()) {
-    auto unuser(_databasesProtector.use());
-    auto theLists = _databasesLists.load();
+void DatabaseFeature::enumerateDatabases(std::function<void(TRI_vocbase_t& vocbase)> const& func) {
+  auto unuser(_databasesProtector.use());
+  auto theLists = _databasesLists.load();
 
-    for (auto& p : theLists->_coordinatorDatabases) {
-      TRI_vocbase_t* vocbase = p.second;
-      // iterate over all databases
-      TRI_ASSERT(vocbase != nullptr);
-      TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_COORDINATOR);
-      func(vocbase);
-    }
-  } else {
-    auto unuser(_databasesProtector.use());
-    auto theLists = _databasesLists.load();
-
-    for (auto& p : theLists->_databases) {
-      TRI_vocbase_t* vocbase = p.second;
-      // iterate over all databases
-      TRI_ASSERT(vocbase != nullptr);
-      TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_NORMAL);
-      func(vocbase);
-    }
+  for (auto& p : theLists->_databases) {
+    TRI_vocbase_t* vocbase = p.second;
+    // iterate over all databases
+    TRI_ASSERT(vocbase != nullptr);
+    func(*vocbase);
   }
 }
 
 void DatabaseFeature::updateContexts() {
-  TRI_ASSERT(_vocbase != nullptr);
-
-  useSystemDatabase();
-
-  auto queryRegistry = QueryRegistryFeature::QUERY_REGISTRY;
-  TRI_ASSERT(queryRegistry != nullptr);
-
-  auto vocbase = _vocbase;
-
   V8DealerFeature* dealer =
       ApplicationServer::getFeature<V8DealerFeature>("V8Dealer");
 
+  if (!dealer->isEnabled()) {
+    return;
+  }
+
+  auto* vocbase = useDatabase(TRI_VOC_SYSTEM_DATABASE);
+  TRI_ASSERT(vocbase);
+
+  auto queryRegistry = QueryRegistryFeature::registry();
+  TRI_ASSERT(queryRegistry != nullptr);
+
   dealer->defineContextUpdate(
-      [queryRegistry, vocbase](v8::Isolate* isolate,
-                               v8::Handle<v8::Context> context, size_t i) {
-        TRI_InitV8VocBridge(isolate, context, queryRegistry, vocbase, i);
+      [queryRegistry, vocbase](v8::Isolate* isolate, v8::Handle<v8::Context> context, size_t i) {
+        TRI_InitV8VocBridge(isolate, context, queryRegistry, *vocbase, i);
         TRI_InitV8Queries(isolate, context);
         TRI_InitV8Cluster(isolate, context);
         TRI_InitV8Agency(isolate, context);
 
         StorageEngine* engine = EngineSelectorFeature::ENGINE;
-        TRI_ASSERT(engine != nullptr); // Engine not loaded. Startup broken
+        TRI_ASSERT(engine != nullptr);  // Engine not loaded. Startup broken
         engine->addV8Functions();
       },
       vocbase);
 }
 
-void DatabaseFeature::closeDatabases() {
+void DatabaseFeature::stopAppliers() {
   // stop the replication appliers so all replication transactions can end
-  ReplicationFeature* replicationFeature =
-      static_cast<ReplicationFeature*>(ApplicationServer::lookupFeature("Replication"));
+  ReplicationFeature* replicationFeature = static_cast<ReplicationFeature*>(
+      ApplicationServer::lookupFeature("Replication"));
 
   if (replicationFeature == nullptr) {
     return;
@@ -1198,9 +1029,9 @@ void DatabaseFeature::closeDatabases() {
   for (auto& p : _databasesLists.load()->_databases) {
     TRI_vocbase_t* vocbase = p.second;
     TRI_ASSERT(vocbase != nullptr);
-    TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_NORMAL);
-    
-    replicationFeature->stopApplier(vocbase);
+    if (vocbase->type() == TRI_VOCBASE_TYPE_NORMAL) {
+      replicationFeature->stopApplier(vocbase);
+    }
   }
 }
 
@@ -1232,16 +1063,7 @@ void DatabaseFeature::closeOpenDatabases() {
   for (auto& p : oldList->_databases) {
     TRI_vocbase_t* vocbase = p.second;
     TRI_ASSERT(vocbase != nullptr);
-    TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_NORMAL);
     vocbase->shutdown();
-
-    delete vocbase;
-  }
-
-  for (auto& p : oldList->_coordinatorDatabases) {
-    TRI_vocbase_t* vocbase = p.second;
-    TRI_ASSERT(vocbase != nullptr);
-    TRI_ASSERT(vocbase->type() == TRI_VOCBASE_TYPE_COORDINATOR);
 
     delete vocbase;
   }
@@ -1261,14 +1083,15 @@ int DatabaseFeature::createBaseApplicationDirectory(std::string const& appPath,
     res = TRI_CreateDirectory(path.c_str(), systemError, errorMessage);
 
     if (res == TRI_ERROR_NO_ERROR) {
-      LOG_TOPIC(INFO, arangodb::Logger::FIXME) << "created base application directory '" << path << "'";
+      LOG_TOPIC(INFO, arangodb::Logger::FIXME)
+          << "created base application directory '" << path << "'";
     } else {
       if ((res != TRI_ERROR_FILE_EXISTS) || (!TRI_IsDirectory(path.c_str()))) {
-        LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "unable to create base application directory "
-                 << errorMessage;
+        LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+            << "unable to create base application directory " << errorMessage;
       } else {
-        LOG_TOPIC(INFO, arangodb::Logger::FIXME) << "someone else created base application directory '" << path
-                  << "'";
+        LOG_TOPIC(INFO, arangodb::Logger::FIXME)
+            << "someone else created base application directory '" << path << "'";
         res = TRI_ERROR_NO_ERROR;
       }
     }
@@ -1294,15 +1117,18 @@ int DatabaseFeature::createApplicationDirectory(std::string const& name,
     res = TRI_CreateRecursiveDirectory(path.c_str(), systemError, errorMessage);
 
     if (res == TRI_ERROR_NO_ERROR) {
-      LOG_TOPIC(TRACE, arangodb::Logger::FIXME) << "created application directory '" << path
-                 << "' for database '" << name << "'";
+      LOG_TOPIC(TRACE, arangodb::Logger::FIXME)
+          << "created application directory '" << path << "' for database '"
+          << name << "'";
     } else if (res == TRI_ERROR_FILE_EXISTS) {
-      LOG_TOPIC(INFO, arangodb::Logger::FIXME) << "unable to create application directory '" << path
-                << "' for database '" << name << "': " << errorMessage;
+      LOG_TOPIC(INFO, arangodb::Logger::FIXME)
+          << "unable to create application directory '" << path
+          << "' for database '" << name << "': " << errorMessage;
       res = TRI_ERROR_NO_ERROR;
     } else {
-      LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "unable to create application directory '" << path
-               << "' for database '" << name << "': " << errorMessage;
+      LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+          << "unable to create application directory '" << path
+          << "' for database '" << name << "': " << errorMessage;
     }
   }
 
@@ -1324,6 +1150,8 @@ int DatabaseFeature::iterateDatabases(VPackSlice const& databases) {
 
   auto oldLists = _databasesLists.load();
   auto newLists = new DatabasesLists(*oldLists);
+
+  ServerState::RoleEnum role = arangodb::ServerState::instance()->getRole();
 
   try {
     for (auto const& it : VPackArrayIterator(databases)) {
@@ -1349,20 +1177,17 @@ int DatabaseFeature::iterateDatabases(VPackSlice const& databases) {
       // open the database and scan collections in it
 
       // try to open this database
-      TRI_vocbase_t* database = engine->openDatabase(it, _upgrade);
+      auto* database = engine->openDatabase(it, _upgrade).release();
 
-      try {
-        database->addReplicationApplier();
-      } catch (std::exception const& ex) {
-        LOG_TOPIC(FATAL, arangodb::Logger::FIXME) << "initializing replication applier for database '"
-                   << database->name() << "' failed: " << ex.what();
-        FATAL_ERROR_EXIT();
-      }
-
-      if (databaseName == TRI_VOC_SYSTEM_DATABASE) {
-        // found the system database
-        TRI_ASSERT(_vocbase == nullptr);
-        _vocbase = database;
+      if (!ServerState::isCoordinator(role) && !ServerState::isAgent(role)) {
+        try {
+          database->addReplicationApplier();
+        } catch (std::exception const& ex) {
+          LOG_TOPIC(FATAL, arangodb::Logger::FIXME)
+              << "initializing replication applier for database '"
+              << database->name() << "' failed: " << ex.what();
+          FATAL_ERROR_EXIT();
+        }
       }
 
       newLists->_databases.insert(std::make_pair(database->name(), database));
@@ -1375,7 +1200,8 @@ int DatabaseFeature::iterateDatabases(VPackSlice const& databases) {
   } catch (...) {
     delete newLists;
 
-    LOG_TOPIC(FATAL, arangodb::Logger::FIXME) << "cannot start database: unknown exception";
+    LOG_TOPIC(FATAL, arangodb::Logger::FIXME)
+        << "cannot start database: unknown exception";
     FATAL_ERROR_EXIT();
   }
 
@@ -1401,8 +1227,6 @@ void DatabaseFeature::closeDroppedDatabases() {
   try {
     newList = new DatabasesLists();
     newList->_databases = _databasesLists.load()->_databases;
-    newList->_coordinatorDatabases =
-        _databasesLists.load()->_coordinatorDatabases;
   } catch (...) {
     delete newList;
     throw;
@@ -1423,8 +1247,9 @@ void DatabaseFeature::closeDroppedDatabases() {
     } else if (vocbase->type() == TRI_VOCBASE_TYPE_COORDINATOR) {
       delete vocbase;
     } else {
-      LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "unknown database type " << vocbase->type() << " "
-               << vocbase->name() << " - close doing nothing.";
+      LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+          << "unknown database type " << vocbase->type() << " "
+          << vocbase->name() << " - close doing nothing.";
     }
   }
 
@@ -1440,15 +1265,15 @@ void DatabaseFeature::verifyAppPaths() {
   if (!appPath.empty() && !TRI_IsDirectory(appPath.c_str())) {
     long systemError;
     std::string errorMessage;
-    int res = TRI_CreateRecursiveDirectory(appPath.c_str(), systemError,
-                                           errorMessage);
+    int res = TRI_CreateRecursiveDirectory(appPath.c_str(), systemError, errorMessage);
 
     if (res == TRI_ERROR_NO_ERROR) {
-      LOG_TOPIC(INFO, arangodb::Logger::FIXME) << "created --javascript.app-path directory '" << appPath
-                << "'";
+      LOG_TOPIC(INFO, arangodb::Logger::FIXME)
+          << "created --javascript.app-path directory '" << appPath << "'";
     } else {
-      LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "unable to create --javascript.app-path directory '"
-               << appPath << "': " << errorMessage;
+      LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+          << "unable to create --javascript.app-path directory '" << appPath
+          << "': " << errorMessage;
       THROW_ARANGO_EXCEPTION(res);
     }
   }
@@ -1457,7 +1282,8 @@ void DatabaseFeature::verifyAppPaths() {
   int res = createBaseApplicationDirectory(appPath, "_db");
 
   if (res != TRI_ERROR_NO_ERROR) {
-    LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "unable to initialize databases: " << TRI_errno_string(res);
+    LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+        << "unable to initialize databases: " << TRI_errno_string(res);
     THROW_ARANGO_EXCEPTION(res);
   }
 }

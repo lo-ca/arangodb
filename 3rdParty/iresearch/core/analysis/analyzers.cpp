@@ -68,8 +68,17 @@ class analyzer_register:
     auto& name = key.name_;
     std::string filename(FILENAME_PREFIX.size() + name.size(), 0);
 
-    std::memcpy(&filename[0], FILENAME_PREFIX.c_str(), FILENAME_PREFIX.size());
-    std::memcpy(&filename[0] + FILENAME_PREFIX.size(), name.c_str(), name.size());
+    std::memcpy(
+      &filename[0],
+      FILENAME_PREFIX.c_str(),
+      FILENAME_PREFIX.size()
+    );
+
+    irs::string_ref::traits_type::copy(
+      &filename[0] + FILENAME_PREFIX.size(),
+      name.c_str(),
+      name.size()
+    );
 
     return filename;
   }
@@ -84,18 +93,25 @@ NS_BEGIN(analysis)
     const string_ref& name,
     const irs::text_format::type_id& args_format
 ) {
-  return analyzer_register::instance().get(entry_key_t(name, args_format));
+  return nullptr != analyzer_register::instance().get(entry_key_t(name, args_format));
 }
 
 /*static*/ analyzer::ptr analyzers::get(
     const string_ref& name,
     const irs::text_format::type_id& args_format,
     const string_ref& args
-) {
-  auto* factory =
-    analyzer_register::instance().get(entry_key_t(name, args_format));
+) NOEXCEPT {
+  try {
+    auto* factory =
+      analyzer_register::instance().get(entry_key_t(name, args_format));
 
-  return factory ? factory(args) : nullptr;
+    return factory ? factory(args) : nullptr;
+  } catch (...) {
+    IR_FRMT_ERROR("Caught exception while getting an analyzer instance");
+    IR_LOG_EXCEPTION();
+  }
+
+  return nullptr;
 }
 
 /*static*/ void analyzers::init() {
@@ -168,7 +184,7 @@ analyzer_registrar::analyzer_registrar(
       );
     }
 
-    IR_STACK_TRACE();
+    IR_LOG_STACK_TRACE();
   }
 }
 

@@ -48,6 +48,12 @@ const RESET = require('internal').COLORS.COLOR_RESET;
 
 const download = require('internal').download;
 
+const testPaths = {
+  'authentication': [tu.pathForTesting('client/authentication')],
+  'authentication_server': [tu.pathForTesting('server/authentication')],
+  'authentication_parameters': []
+};
+
 // //////////////////////////////////////////////////////////////////////////////
 // / @brief TEST: authentication
 // //////////////////////////////////////////////////////////////////////////////
@@ -64,7 +70,9 @@ function authenticationClient (options) {
   }
 
   print(CYAN + 'Client Authentication tests...' + RESET);
-  let testCases = tu.scanTestPath('js/client/tests/authentication');
+  let testCases = tu.scanTestPaths(testPaths.authentication);
+
+  testCases = tu.splitBuckets(options, testCases);
 
   return tu.performTests(options, testCases, 'authentication', tu.runInArangosh, {
     'server.authentication': 'true',
@@ -74,7 +82,10 @@ function authenticationClient (options) {
 }
 
 function authenticationServer (options) {
-  let testCases = tu.scanTestPath('js/server/tests/authentication');
+  let testCases = tu.scanTestPaths(testPaths.authentication_server);
+
+  testCases = tu.splitBuckets(options, testCases);
+
   if ((testCases.length === 0) || (options.skipAuthentication === true)) {
     print('skipping Authentication tests!');
     return {
@@ -262,7 +273,8 @@ function authenticationParameters (options) {
   return results;
 }
 
-function setup (testFns, defaultFns, opts, fnDocs, optionsDoc) {
+exports.setup = function (testFns, defaultFns, opts, fnDocs, optionsDoc, allTestPaths) {
+  Object.assign(allTestPaths, testPaths);
   testFns['authentication'] = authenticationClient;
   testFns['authentication_server'] = authenticationServer;
   testFns['authentication_parameters'] = authenticationParameters;
@@ -275,6 +287,4 @@ function setup (testFns, defaultFns, opts, fnDocs, optionsDoc) {
 
   for (var attrname in functionsDocumentation) { fnDocs[attrname] = functionsDocumentation[attrname]; }
   for (var i = 0; i < optionsDocumentation.length; i++) { optionsDoc.push(optionsDocumentation[i]); }
-}
-
-exports.setup = setup;
+};

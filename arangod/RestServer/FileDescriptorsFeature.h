@@ -27,14 +27,13 @@
 #include "ApplicationFeatures/ApplicationFeature.h"
 
 namespace arangodb {
+
 class FileDescriptorsFeature : public application_features::ApplicationFeature {
-public:
+ public:
   static uint64_t const RECOMMENDED;
 
- public:
-  explicit FileDescriptorsFeature(application_features::ApplicationServer*);
+  explicit FileDescriptorsFeature(application_features::ApplicationServer& server);
 
- public:
   void collectOptions(std::shared_ptr<options::ProgramOptions>) override final;
   void prepare() override final;
   void start() override final;
@@ -42,9 +41,9 @@ public:
  private:
   uint64_t _descriptorsMinimum;
 
- private:
   void adjustFileDescriptors();
 };
-}
+
+}  // namespace arangodb
 
 #endif

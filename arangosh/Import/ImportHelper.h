@@ -25,10 +25,14 @@
 #ifndef ARANGODB_IMPORT_IMPORT_HELPER_H
 #define ARANGODB_IMPORT_IMPORT_HELPER_H 1
 
+#include <atomic>
+
+#include "AutoTuneThread.h"
+#include "QuickHistogram.h"
+
 #include "Basics/Common.h"
 #include "Basics/ConditionVariable.h"
 #include "Basics/Mutex.h"
-
 #include "Basics/StringBuffer.h"
 #include "Basics/csv.h"
 
@@ -42,8 +46,8 @@ namespace httpclient {
 class SimpleHttpClient;
 class SimpleHttpResult;
 struct SimpleHttpClientParams;
-}
-}
+}  // namespace httpclient
+}  // namespace arangodb
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief class for http requests
@@ -60,6 +64,7 @@ struct ImportStatistics {
   size_t _numberIgnored = 0;
 
   arangodb::Mutex _mutex;
+  QuickHistogram _histogram;
 };
 
 class ImportHelper {
@@ -76,8 +81,8 @@ class ImportHelper {
 
  public:
   ImportHelper(ClientFeature const* client, std::string const& endpoint,
-               httpclient::SimpleHttpClientParams const& params,
-               uint64_t maxUploadSize, uint32_t threadCount);
+               httpclient::SimpleHttpClientParams const& params, uint64_t maxUploadSize,
+               uint32_t threadCount, bool autoUploadSize = false);
 
   ~ImportHelper();
 
@@ -86,8 +91,7 @@ class ImportHelper {
   //////////////////////////////////////////////////////////////////////////////
 
   bool importDelimited(std::string const& collectionName,
-                       std::string const& fileName,
-                       DelimitedImportType typeImport);
+                       std::string const& fileName, DelimitedImportType typeImport);
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief imports a file with JSON objects
@@ -153,11 +157,10 @@ class ImportHelper {
     _createCollectionType = value;
   }
 
-  void setTranslations(
-      std::unordered_map<std::string, std::string> const& translations) {
+  void setTranslations(std::unordered_map<std::string, std::string> const& translations) {
     _translations = translations;
   }
-  
+
   void setRemoveAttributes(std::vector<std::string> const& attr) {
     for (std::string const& str : attr) {
       _removeAttributes.insert(str);
@@ -238,6 +241,11 @@ class ImportHelper {
   size_t getRowsRead() const { return _rowsRead; }
 
   //////////////////////////////////////////////////////////////////////////////
+  /// @brief start the optional histogram thread
+  //////////////////////////////////////////////////////////////////////////////
+  void startHistogram() { _stats._histogram.start(); }
+
+  //////////////////////////////////////////////////////////////////////////////
   /// @brief get the error message
   ///
   /// @return string       get the error message
@@ -245,21 +253,29 @@ class ImportHelper {
 
   std::vector<std::string> getErrorMessages() { return _errorMessages; }
 
+  uint64_t getMaxUploadSize() { return (_maxUploadSize.load()); }
+  void setMaxUploadSize(uint64_t newSize) { _maxUploadSize.store(newSize); }
+
+  uint64_t rotatePeriodByteCount() { return (_periodByteCount.exchange(0)); }
+  void addPeriodByteCount(uint64_t add) { _periodByteCount.fetch_add(add); }
+
+  uint32_t getThreadCount() const { return _threadCount; }
+
+  static unsigned const MaxBatchSize;
+
  private:
   static void ProcessCsvBegin(TRI_csv_parser_t*, size_t);
-  static void ProcessCsvAdd(TRI_csv_parser_t*, char const*, size_t, size_t,
-                            size_t, bool);
-  static void ProcessCsvEnd(TRI_csv_parser_t*, char const*, size_t, size_t,
-                            size_t, bool);
+  static void ProcessCsvAdd(TRI_csv_parser_t*, char const*, size_t, size_t, size_t, bool);
+  static void ProcessCsvEnd(TRI_csv_parser_t*, char const*, size_t, size_t, size_t, bool);
 
   void reportProgress(int64_t, int64_t, double&);
 
   std::string getCollectionUrlPart() const;
   void beginLine(size_t row);
   void addField(char const*, size_t, size_t row, size_t column, bool escaped);
-  void addLastField(char const*, size_t, size_t row, size_t column,
-                    bool escaped);
+  void addLastField(char const*, size_t, size_t row, size_t column, bool escaped);
 
+  bool collectionExists();
   bool checkCreateCollection();
   bool truncateCollection();
 
@@ -270,9 +286,14 @@ class ImportHelper {
 
  private:
   std::unique_ptr<httpclient::SimpleHttpClient> _httpClient;
-  uint64_t const _maxUploadSize;
+  std::atomic<uint64_t> _maxUploadSize;
+  std::atomic<uint64_t> _periodByteCount;
+  bool const _autoUploadSize;
+  std::unique_ptr<AutoTuneThread> _autoTuneThread;
   std::vector<std::unique_ptr<SenderThread>> _senderThreads;
-  basics::ConditionVariable _threadsCondition; 
+  uint32_t const _threadCount;
+  basics::ConditionVariable _threadsCondition;
+  basics::StringBuffer _tempBuffer;
 
   std::string _separator;
   std::string _quote;
@@ -311,6 +332,6 @@ class ImportHelper {
 
   static double const ProgressStep;
 };
-}
-}
+}  // namespace import
+}  // namespace arangodb
 #endif

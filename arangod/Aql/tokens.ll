@@ -21,7 +21,6 @@
 #include "Basics/Common.h"
 #include "Basics/conversions.h"
 #include "Basics/NumberUtils.h"
-#include "Basics/StringUtils.h"
 
 // introduce the namespace here, otherwise following references to
 // the namespace in auto-generated headers might fail
@@ -33,10 +32,11 @@ class Parser;
 }
 }
 
-
 #include "Aql/AstNode.h"
 #include "Aql/grammar.h"
 #include "Aql/Parser.h"
+
+#include <algorithm>
 
 #define YY_EXTRA_TYPE arangodb::aql::Parser*
 
@@ -50,10 +50,7 @@ class Parser;
 #define YY_NO_INPUT 1
 
 #define YY_INPUT(resultBuffer, resultState, maxBytesToRead) {            \
-  size_t length = yyextra->remainingLength();                            \
-  if (length > static_cast<size_t>(maxBytesToRead)) {                    \
-    length = static_cast<size_t>(maxBytesToRead);                        \
-  }                                                                      \
+  size_t length = std::min(yyextra->remainingLength(), static_cast<size_t>(maxBytesToRead));  \
   if (length > 0) {                                                      \
     yyextra->fillBuffer(resultBuffer, length);                           \
     resultState = length;                                                \
@@ -187,10 +184,6 @@ class Parser;
 
 (?i:LIKE) {
   return T_LIKE;
-}
-
-(?i:VIEW) {
-  return T_VIEW;
 }
 
  /* ---------------------------------------------------------------------------
@@ -466,15 +459,14 @@ class Parser;
   if (valid) {
     node = parser->ast()->createNodeValueInt(value1);
   } else {
-    try {
-      double value2 = TRI_DoubleString(yytext);
-      node = parser->ast()->createNodeValueDouble(value2);
-    } catch (...) {
-      parser->registerWarning(
-        TRI_ERROR_QUERY_NUMBER_OUT_OF_RANGE,
-        TRI_errno_string(TRI_ERROR_QUERY_NUMBER_OUT_OF_RANGE),
-        yylloc->first_line, yylloc->first_column);
+    // TODO: use std::from_chars
+    double value2 = TRI_DoubleString(yytext);
+
+    if (TRI_errno() != TRI_ERROR_NO_ERROR) {
+      parser->registerWarning(TRI_ERROR_QUERY_NUMBER_OUT_OF_RANGE, TRI_errno_string(TRI_ERROR_QUERY_NUMBER_OUT_OF_RANGE), yylloc->first_line, yylloc->first_column);
       node = parser->ast()->createNodeValueNull();
+    } else {
+      node = parser->ast()->createNodeValueDouble(value2);
     }
   }
 
@@ -483,18 +475,18 @@ class Parser;
   return T_INTEGER;
 }
 
-(0|[1-9][0-9]*)((\.[0-9]+)?([eE][\-\+]?[0-9]+)?) {
+((0|[1-9][0-9]*)(\.[0-9]+)?|\.[0-9]+)([eE][\-\+]?[0-9]+)? {
   /* a numeric double value */
 
   arangodb::aql::AstNode* node = nullptr;
   auto parser = yyextra;
+  // TODO: use std::from_chars
   double value = TRI_DoubleString(yytext);
 
   if (TRI_errno() != TRI_ERROR_NO_ERROR) {
     parser->registerWarning(TRI_ERROR_QUERY_NUMBER_OUT_OF_RANGE, TRI_errno_string(TRI_ERROR_QUERY_NUMBER_OUT_OF_RANGE), yylloc->first_line, yylloc->first_column);
     node = parser->ast()->createNodeValueNull();
-  }
-  else {
+  } else {
     node = parser->ast()->createNodeValueDouble(value);
   }
 
@@ -507,12 +499,24 @@ class Parser;
   * bind parameters
   * --------------------------------------------------------------------------- */
 
-@@?(_+[a-zA-Z0-9]+[a-zA-Z0-9_]*|[a-zA-Z0-9][a-zA-Z0-9_]*) {
+@(_+[a-zA-Z0-9]+[a-zA-Z0-9_]*|[a-zA-Z0-9][a-zA-Z0-9_]*) {
   /* bind parameters must start with a @
-     if followed by another @, this is a collection name parameter */
+     if followed by another @, this is a collection name or a view name parameter */
   yylval->strval.value = yyextra->query()->registerString(yytext + 1, yyleng - 1);
   yylval->strval.length = yyleng - 1;
   return T_PARAMETER;
+}
+
+ /* ---------------------------------------------------------------------------
+  * bind data source parameters
+  * --------------------------------------------------------------------------- */
+
+@@(_+[a-zA-Z0-9]+[a-zA-Z0-9_]*|[a-zA-Z0-9][a-zA-Z0-9_]*) {
+  /* bind parameters must start with a @
+     if followed by another @, this is a collection name or a view name parameter */
+  yylval->strval.value = yyextra->query()->registerString(yytext + 1, yyleng - 1);
+  yylval->strval.length = yyleng - 1;
+  return T_DATA_SOURCE_PARAMETER;
 }
 
  /* ---------------------------------------------------------------------------

@@ -33,19 +33,22 @@
 #endif
 
 #include "GeneralServer/AuthenticationFeature.h"
-#include "IResearch/ApplicationServerHelper.h"
 #include "IResearch/IResearchAnalyzerFeature.h"
-#include "IResearch/IResearchFeature.h"
+#include "IResearch/IResearchCommon.h"
 #include "IResearch/IResearchDocument.h"
+#include "IResearch/IResearchFilterFactory.h"
 #include "IResearch/IResearchLinkMeta.h"
+#include "IResearch/IResearchPrimaryKeyFilter.h"
 #include "IResearch/IResearchKludge.h"
-#include "IResearch/SystemDatabaseFeature.h"
 #include "Logger/Logger.h"
 #include "Logger/LogTopic.h"
 #include "RestServer/DatabaseFeature.h"
-#include "RestServer/FeatureCacheFeature.h"
 #include "RestServer/QueryRegistryFeature.h"
+#include "RestServer/SystemDatabaseFeature.h"
+#include "Sharding/ShardingFeature.h"
 #include "StorageEngine/EngineSelectorFeature.h"
+#include "Transaction/StandaloneContext.h"
+#include "Transaction/Methods.h"
 
 #include "velocypack/Iterator.h"
 #include "velocypack/Builder.h"
@@ -58,7 +61,9 @@
 #include "index/index_writer.hpp"
 #include "store/memory_directory.hpp"
 
-NS_LOCAL
+#include <memory>
+
+namespace {
 
 struct TestAttribute: public irs::attribute {
   DECLARE_ATTRIBUTE_TYPE();
@@ -115,36 +120,7 @@ bool InvalidAnalyzer::returnNullFromMake = false;
 DEFINE_ANALYZER_TYPE_NAMED(InvalidAnalyzer, "iresearch-document-invalid");
 REGISTER_ANALYZER_JSON(InvalidAnalyzer, InvalidAnalyzer::make);
 
-std::string mangleBool(std::string name) {
-  arangodb::iresearch::kludge::mangleBool(name);
-  return name;
 }
-
-std::string mangleNull(std::string name) {
-  arangodb::iresearch::kludge::mangleNull(name);
-  return name;
-}
-
-std::string mangleNumeric(std::string name) {
-  arangodb::iresearch::kludge::mangleNumeric(name);
-  return name;
-}
-
-std::string mangleString(std::string name, std::string suffix) {
-  arangodb::iresearch::kludge::mangleAnalyzer(name);
-  name += suffix;
-  return name;
-}
-
-std::string mangleStringIdentity(std::string name) {
-  arangodb::iresearch::kludge::mangleStringField(
-    name,
-    arangodb::iresearch::IResearchAnalyzerFeature::identity()
-  );
-  return name;
-}
-
-NS_END
 
 // -----------------------------------------------------------------------------
 // --SECTION--                                                 setup / tear-down
@@ -156,7 +132,7 @@ struct IResearchDocumentSetup {
   std::unique_ptr<TRI_vocbase_t> system;
   std::vector<std::pair<arangodb::application_features::ApplicationFeature*, bool>> features;
 
-  IResearchDocumentSetup(): server(nullptr, nullptr) {
+  IResearchDocumentSetup(): engine(server), server(nullptr, nullptr) {
     arangodb::EngineSelectorFeature::ENGINE = &engine;
 
     arangodb::tests::init();
@@ -165,18 +141,18 @@ struct IResearchDocumentSetup {
     arangodb::LogTopic::setLogLevel(arangodb::Logger::AUTHENTICATION.name(), arangodb::LogLevel::WARN);
 
     // setup required application features
-    features.emplace_back(new arangodb::AuthenticationFeature(&server), true); // required for FeatureCacheFeature
-    features.emplace_back(new arangodb::DatabaseFeature(&server), false); // required for FeatureCacheFeature
-    features.emplace_back(new arangodb::FeatureCacheFeature(&server), true); // required for IResearchAnalyzerFeature
-    features.emplace_back(new arangodb::QueryRegistryFeature(&server), false); // required for constructing TRI_vocbase_t
-    arangodb::application_features::ApplicationServer::server->addFeature(features.back().first);
+    features.emplace_back(new arangodb::AuthenticationFeature(server), true);
+    features.emplace_back(new arangodb::DatabaseFeature(server), false);
+    features.emplace_back(new arangodb::QueryRegistryFeature(server), false); // required for constructing TRI_vocbase_t
+    arangodb::application_features::ApplicationServer::server->addFeature(features.back().first); // need QueryRegistryFeature feature to be added now in order to create the system database
     system = irs::memory::make_unique<TRI_vocbase_t>(TRI_vocbase_type_e::TRI_VOCBASE_TYPE_NORMAL, 0, TRI_VOC_SYSTEM_DATABASE);
-    features.emplace_back(new arangodb::aql::AqlFunctionFeature(&server), true); // required for IResearchAnalyzerFeature
-    features.emplace_back(new arangodb::iresearch::IResearchAnalyzerFeature(&server), true);
-    features.emplace_back(new arangodb::iresearch::SystemDatabaseFeature(&server, system.get()), false); // required for IResearchAnalyzerFeature
+    features.emplace_back(new arangodb::SystemDatabaseFeature(server, system.get()), false); // required for IResearchAnalyzerFeature
+    features.emplace_back(new arangodb::aql::AqlFunctionFeature(server), true); // required for IResearchAnalyzerFeature
+    features.emplace_back(new arangodb::ShardingFeature(server), true);
+    features.emplace_back(new arangodb::iresearch::IResearchAnalyzerFeature(server), true);
 
     #if USE_ENTERPRISE
-      features.emplace_back(new arangodb::LdapFeature(&server), false); // required for AuthenticationFeature with USE_ENTERPRISE
+      features.emplace_back(new arangodb::LdapFeature(server), false); // required for AuthenticationFeature with USE_ENTERPRISE
     #endif
 
     for (auto& f : features) {
@@ -193,22 +169,24 @@ struct IResearchDocumentSetup {
       }
     }
 
-    auto* analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+    auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+      arangodb::iresearch::IResearchAnalyzerFeature
+    >();
 
     // ensure that there will be no exception on 'emplace'
     InvalidAnalyzer::returnNullFromMake = false;
 
-    analyzers->emplace("iresearch-document-empty", "iresearch-document-empty", "en"); // cache analyzer
-    analyzers->emplace("iresearch-document-invalid", "iresearch-document-invalid", "en"); // cache analyzer
+    analyzers->emplace("iresearch-document-empty", "iresearch-document-empty", "en", irs::flags{ TestAttribute::type() }); // cache analyzer
+    analyzers->emplace("iresearch-document-invalid", "iresearch-document-invalid", "en", irs::flags{ TestAttribute::type() }); // cache analyzer
 
     // suppress log messages since tests check error conditions
-    arangodb::LogTopic::setLogLevel(arangodb::iresearch::IResearchFeature::IRESEARCH.name(), arangodb::LogLevel::FATAL);
+    arangodb::LogTopic::setLogLevel(arangodb::iresearch::TOPIC.name(), arangodb::LogLevel::FATAL);
     irs::logger::output_le(iresearch::logger::IRL_FATAL, stderr);
   }
 
   ~IResearchDocumentSetup() {
     system.reset(); // destroy before reseting the 'ENGINE'
-    arangodb::LogTopic::setLogLevel(arangodb::iresearch::IResearchFeature::IRESEARCH.name(), arangodb::LogLevel::DEFAULT);
+    arangodb::LogTopic::setLogLevel(arangodb::iresearch::TOPIC.name(), arangodb::LogLevel::DEFAULT);
     arangodb::application_features::ApplicationServer::server = nullptr;
     arangodb::EngineSelectorFeature::ENGINE = nullptr;
 
@@ -223,7 +201,6 @@ struct IResearchDocumentSetup {
       f.first->unprepare();
     }
 
-    arangodb::FeatureCacheFeature::reset();
     arangodb::LogTopic::setLogLevel(arangodb::Logger::AUTHENTICATION.name(), arangodb::LogLevel::DEFAULT);
   }
 };
@@ -239,61 +216,6 @@ struct IResearchDocumentSetup {
 TEST_CASE("IResearchDocumentTest", "[iresearch][iresearch-document]") {
   IResearchDocumentSetup s;
   UNUSED(s);
-
-SECTION("Field_setCid") {
-  irs::flags features;
-  features.add<TestAttribute>();
-
-  arangodb::iresearch::Field field;
-
-  // reset field
-  field._features = &features;
-  field._analyzer = nullptr;
-
-  // check CID value
-  {
-    TRI_voc_cid_t cid = 10;
-    arangodb::iresearch::Field::setCidValue(field, cid, arangodb::iresearch::Field::init_stream_t());
-    CHECK(arangodb::iresearch::DocumentPrimaryKey::CID() == field._name);
-    CHECK(&irs::flags::empty_instance() == field._features);
-
-    auto* stream = dynamic_cast<irs::string_token_stream*>(field._analyzer.get());
-    REQUIRE(nullptr != stream);
-    CHECK(stream->next());
-    CHECK(!stream->next());
-
-    arangodb::iresearch::Field::setCidValue(field, cid);
-    CHECK(arangodb::iresearch::DocumentPrimaryKey::CID() == field._name);
-    CHECK(&irs::flags::empty_instance() == field._features);
-    CHECK(stream == field._analyzer.get());
-    CHECK(stream->next());
-    CHECK(!stream->next());
-  }
-
-  // reset field
-  field._features = &features;
-  field._analyzer = nullptr;
-
-  // check RID value
-  {
-    TRI_voc_rid_t rid = 10;
-    arangodb::iresearch::Field::setRidValue(field, rid, arangodb::iresearch::Field::init_stream_t());
-    CHECK(arangodb::iresearch::DocumentPrimaryKey::RID() == field._name);
-    CHECK(&irs::flags::empty_instance() == field._features);
-
-    auto* stream = dynamic_cast<irs::string_token_stream*>(field._analyzer.get());
-    REQUIRE(nullptr != stream);
-    CHECK(stream->next());
-    CHECK(!stream->next());
-
-    arangodb::iresearch::Field::setRidValue(field, rid);
-    CHECK(arangodb::iresearch::DocumentPrimaryKey::RID() == field._name);
-    CHECK(&irs::flags::empty_instance() == field._features);
-    CHECK(stream == field._analyzer.get());
-    CHECK(stream->next());
-    CHECK(!stream->next());
-  }
-}
 
 SECTION("FieldIterator_static_checks") {
   static_assert(
@@ -338,10 +260,16 @@ SECTION("FieldIterator_static_checks") {
 }
 
 SECTION("FieldIterator_construct") {
-  arangodb::iresearch::FieldIterator it;
+  std::vector<std::string> EMPTY;
+  arangodb::transaction::Methods trx(
+    arangodb::transaction::StandaloneContext::Create(*s.system),
+    EMPTY, EMPTY, EMPTY,
+    arangodb::transaction::Options()
+  );
+
+  arangodb::iresearch::FieldIterator it(trx);
   CHECK(!it.valid());
-  CHECK(it == arangodb::iresearch::FieldIterator());
-  CHECK(it == arangodb::iresearch::FieldIterator::END);
+  CHECK(it == arangodb::iresearch::FieldIterator(trx));
 }
 
 SECTION("FieldIterator_traverse_complex_object_custom_nested_delimiter") {
@@ -382,12 +310,22 @@ SECTION("FieldIterator_traverse_complex_object_custom_nested_delimiter") {
   arangodb::iresearch::IResearchLinkMeta linkMeta;
   linkMeta._includeAllFields = true; // include all fields
 
-  arangodb::iresearch::FieldIterator it(slice, linkMeta);
-  CHECK(it != arangodb::iresearch::FieldIterator::END);
+  std::vector<std::string> EMPTY;
+  arangodb::transaction::Methods trx(
+    arangodb::transaction::StandaloneContext::Create(*s.system),
+    EMPTY, EMPTY, EMPTY,
+    arangodb::transaction::Options()
+  );
+
+  arangodb::iresearch::FieldIterator it(trx);
+  it.reset(slice, linkMeta);
+  CHECK(it != arangodb::iresearch::FieldIterator(trx));
 
   // default analyzer
   auto const expected_analyzer =  irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-  auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+  auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+    arangodb::iresearch::IResearchAnalyzerFeature
+  >();
   CHECK(nullptr != analyzers);
   auto const expected_features = analyzers->get("identity")->features();
 
@@ -410,7 +348,7 @@ SECTION("FieldIterator_traverse_complex_object_custom_nested_delimiter") {
   }
 
   CHECK(expectedValues.empty());
-  CHECK(it == arangodb::iresearch::FieldIterator::END);
+  CHECK(it == arangodb::iresearch::FieldIterator(trx));
 }
 
 SECTION("FieldIterator_traverse_complex_object_all_fields") {
@@ -451,12 +389,22 @@ SECTION("FieldIterator_traverse_complex_object_all_fields") {
   arangodb::iresearch::IResearchLinkMeta linkMeta;
   linkMeta._includeAllFields = true;
 
-  arangodb::iresearch::FieldIterator it(slice, linkMeta);
-  CHECK(it != arangodb::iresearch::FieldIterator::END);
+  std::vector<std::string> EMPTY;
+  arangodb::transaction::Methods trx(
+    arangodb::transaction::StandaloneContext::Create(*s.system),
+    EMPTY, EMPTY, EMPTY,
+    arangodb::transaction::Options()
+  );
+
+  arangodb::iresearch::FieldIterator it(trx);
+  it.reset(slice, linkMeta);
+  CHECK(it != arangodb::iresearch::FieldIterator(trx));
 
   // default analyzer
   auto const expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-  auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+  auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+    arangodb::iresearch::IResearchAnalyzerFeature
+  >();
   CHECK(nullptr != analyzers);
   auto const expected_features = analyzers->get("identity")->features();
 
@@ -479,7 +427,7 @@ SECTION("FieldIterator_traverse_complex_object_all_fields") {
   }
 
   CHECK(expectedValues.empty());
-  CHECK(it == arangodb::iresearch::FieldIterator::END);
+  CHECK(it == arangodb::iresearch::FieldIterator(trx));
 }
 
 SECTION("FieldIterator_traverse_complex_object_ordered_all_fields") {
@@ -539,11 +487,21 @@ SECTION("FieldIterator_traverse_complex_object_ordered_all_fields") {
 
   // default analyzer
   auto const expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-  auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+  auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+    arangodb::iresearch::IResearchAnalyzerFeature
+  >();
   CHECK(nullptr != analyzers);
   auto const expected_features = analyzers->get("identity")->features();
 
-  arangodb::iresearch::FieldIterator doc(slice, linkMeta);
+  std::vector<std::string> EMPTY;
+  arangodb::transaction::Methods trx(
+    arangodb::transaction::StandaloneContext::Create(*s.system),
+    EMPTY, EMPTY, EMPTY,
+    arangodb::transaction::Options()
+  );
+
+  arangodb::iresearch::FieldIterator doc(trx);
+  doc.reset(slice, linkMeta);
   for (;doc.valid(); ++doc) {
     auto& field = *doc;
     std::string const actualName = std::string(field.name());
@@ -588,14 +546,24 @@ SECTION("FieldIterator_traverse_complex_object_ordered_filtered") {
   std::string error;
   REQUIRE(linkMeta.init(linkMetaJson->slice(), error));
 
-  arangodb::iresearch::FieldIterator it(slice, linkMeta);
+  std::vector<std::string> EMPTY;
+  arangodb::transaction::Methods trx(
+    arangodb::transaction::StandaloneContext::Create(*s.system),
+    EMPTY, EMPTY, EMPTY,
+    arangodb::transaction::Options()
+  );
+
+  arangodb::iresearch::FieldIterator it(trx);
+  it.reset(slice, linkMeta);
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   auto& value = *it;
   CHECK(mangleStringIdentity("boost") == value.name());
   const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-  auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+  auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+    arangodb::iresearch::IResearchAnalyzerFeature
+  >();
   CHECK(nullptr != analyzers);
   auto const expected_features = analyzers->get("identity")->features();
   auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -604,7 +572,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_filtered") {
 
   ++it;
   CHECK(!it.valid());
-  CHECK(it == arangodb::iresearch::FieldIterator::END);
+  CHECK(it == arangodb::iresearch::FieldIterator(trx));
 }
 
 SECTION("FieldIterator_traverse_complex_object_ordered_filtered") {
@@ -630,9 +598,17 @@ SECTION("FieldIterator_traverse_complex_object_ordered_filtered") {
   linkMeta._includeAllFields = false; // ignore all fields
   linkMeta._trackListPositions = true; // allow indexes in field names
 
-  arangodb::iresearch::FieldIterator it(slice, linkMeta);
+  std::vector<std::string> EMPTY;
+  arangodb::transaction::Methods trx(
+    arangodb::transaction::StandaloneContext::Create(*s.system),
+    EMPTY, EMPTY, EMPTY,
+    arangodb::transaction::Options()
+  );
+
+  arangodb::iresearch::FieldIterator it(trx);
+  it.reset(slice, linkMeta);
   CHECK(!it.valid());
-  CHECK(it == arangodb::iresearch::FieldIterator::END);
+  CHECK(it == arangodb::iresearch::FieldIterator(trx));
 }
 
 SECTION("FieldIterator_traverse_complex_object_ordered_empty_analyzers") {
@@ -658,13 +634,23 @@ SECTION("FieldIterator_traverse_complex_object_ordered_empty_analyzers") {
   linkMeta._analyzers.clear(); // clear all analyzers
   linkMeta._includeAllFields = true; // include all fields
 
-  arangodb::iresearch::FieldIterator it(slice, linkMeta);
+  std::vector<std::string> EMPTY;
+  arangodb::transaction::Methods trx(
+    arangodb::transaction::StandaloneContext::Create(*s.system),
+    EMPTY, EMPTY, EMPTY,
+    arangodb::transaction::Options()
+  );
+
+  arangodb::iresearch::FieldIterator it(trx);
+  it.reset(slice, linkMeta);
   CHECK(!it.valid());
-  CHECK(it == arangodb::iresearch::FieldIterator::END);
+  CHECK(it == arangodb::iresearch::FieldIterator(trx));
 }
 
 SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
-  auto* analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+  auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+    arangodb::iresearch::IResearchAnalyzerFeature
+  >();
   auto json = arangodb::velocypack::Parser::fromJson("{ \
     \"mustBeSkipped\" : {}, \
     \"stringValue\": \"string\", \
@@ -686,15 +672,25 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
   linkMeta._analyzers.emplace_back(analyzers->get("iresearch-document-empty")); // add analyzer
   linkMeta._includeAllFields = true; // include all fields
 
-  arangodb::iresearch::FieldIterator it(slice, linkMeta);
-  CHECK(it != arangodb::iresearch::FieldIterator::END);
+  std::vector<std::string> EMPTY;
+  arangodb::transaction::Methods trx(
+    arangodb::transaction::StandaloneContext::Create(*s.system),
+    EMPTY, EMPTY, EMPTY,
+    arangodb::transaction::Options()
+  );
+
+  arangodb::iresearch::FieldIterator it(trx);
+  it.reset(slice, linkMeta);
+  CHECK(it != arangodb::iresearch::FieldIterator(trx));
 
   // stringValue (with IdentityAnalyzer)
   {
     auto& field = *it;
     CHECK(mangleStringIdentity("stringValue") == field.name());
     auto const expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-    auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+    auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+      arangodb::iresearch::IResearchAnalyzerFeature
+    >();
     CHECK(nullptr != analyzers);
     auto const expected_features = analyzers->get("identity")->features();
     auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(field.get_tokens());
@@ -704,7 +700,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // stringValue (with EmptyAnalyzer)
   {
@@ -713,12 +709,12 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
     auto const expected_analyzer = irs::analysis::analyzers::get("iresearch-document-empty", irs::text_format::json, "en");
     auto& analyzer = dynamic_cast<EmptyAnalyzer&>(field.get_tokens());
     CHECK(&expected_analyzer->type() == &analyzer.type());
-    CHECK(expected_analyzer->attributes().features() == field.features());
+    CHECK(irs::flags({TestAttribute::type()}) == field.features());
   }
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // nullValue
   {
@@ -730,7 +726,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // trueValue
   {
@@ -742,7 +738,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // falseValue
   {
@@ -754,7 +750,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // smallIntValue
   {
@@ -766,7 +762,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // smallNegativeIntValue
   {
@@ -778,7 +774,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // bigIntValue
   {
@@ -790,7 +786,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // bigNegativeIntValue
   {
@@ -802,7 +798,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // smallDoubleValue
   {
@@ -814,7 +810,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // bigDoubleValue
   {
@@ -826,7 +822,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // bigNegativeDoubleValue
   {
@@ -838,7 +834,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_check_value_types") {
 
   ++it;
   CHECK(!it.valid());
-  CHECK(it == arangodb::iresearch::FieldIterator::END);
+  CHECK(it == arangodb::iresearch::FieldIterator(trx));
 }
 
 SECTION("FieldIterator_reset") {
@@ -854,14 +850,24 @@ SECTION("FieldIterator_reset") {
   arangodb::iresearch::IResearchLinkMeta linkMeta;
   linkMeta._includeAllFields = true; // include all fields
 
-  arangodb::iresearch::FieldIterator it(json0->slice(), linkMeta);
+  std::vector<std::string> EMPTY;
+  arangodb::transaction::Methods trx(
+    arangodb::transaction::StandaloneContext::Create(*s.system),
+    EMPTY, EMPTY, EMPTY,
+    arangodb::transaction::Options()
+  );
+
+  arangodb::iresearch::FieldIterator it(trx);
+  it.reset(json0->slice(), linkMeta);
   REQUIRE(it.valid());
 
   {
     auto& value = *it;
     CHECK(mangleStringIdentity("boost") == value.name());
     const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-    auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+    auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+      arangodb::iresearch::IResearchAnalyzerFeature
+    >();
     CHECK(nullptr != analyzers);
     auto const expected_features = analyzers->get("identity")->features();
     auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -877,7 +883,9 @@ SECTION("FieldIterator_reset") {
     auto& value = *it;
     CHECK(mangleStringIdentity("depth") == value.name());
     const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-    auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+    auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+      arangodb::iresearch::IResearchAnalyzerFeature
+    >();
     CHECK(nullptr != analyzers);
     auto const expected_features = analyzers->get("identity")->features();
     auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -895,7 +903,9 @@ SECTION("FieldIterator_reset") {
     auto& value = *it;
     CHECK(mangleStringIdentity("name") == value.name());
     const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-    auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+    auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+      arangodb::iresearch::IResearchAnalyzerFeature
+    >();
     CHECK(nullptr != analyzers);
     auto const expected_features = analyzers->get("identity")->features();
     auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -962,16 +972,26 @@ SECTION("FieldIterator_traverse_complex_object_ordered_all_fields_custom_list_of
   linkMeta._includeAllFields = true; // include all fields
   linkMeta._trackListPositions = true; // allow indexes in field names
 
-  arangodb::iresearch::FieldIterator it(slice, linkMeta);
-  CHECK(it != arangodb::iresearch::FieldIterator::END);
+  std::vector<std::string> EMPTY;
+  arangodb::transaction::Methods trx(
+    arangodb::transaction::StandaloneContext::Create(*s.system),
+    EMPTY, EMPTY, EMPTY,
+    arangodb::transaction::Options()
+  );
+
+  arangodb::iresearch::FieldIterator it(trx);
+  it.reset(slice, linkMeta);
+  CHECK(it != arangodb::iresearch::FieldIterator(trx));
 
   // default analyzer
   auto const expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-  auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+  auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+    arangodb::iresearch::IResearchAnalyzerFeature
+  >();
   CHECK(nullptr != analyzers);
   auto const expected_features = analyzers->get("identity")->features();
 
-  for ( ; it != arangodb::iresearch::FieldIterator::END; ++it) {
+  for ( ; it != arangodb::iresearch::FieldIterator(trx); ++it) {
     auto& field = *it;
     std::string const actualName = std::string(field.name());
     CHECK(1 == expectedValues.erase(actualName));
@@ -982,7 +1002,7 @@ SECTION("FieldIterator_traverse_complex_object_ordered_all_fields_custom_list_of
   }
 
   CHECK(expectedValues.empty());
-  CHECK(it == arangodb::iresearch::FieldIterator::END);
+  CHECK(it == arangodb::iresearch::FieldIterator(trx));
 }
 
 SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
@@ -1025,9 +1045,17 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
   std::string error;
   REQUIRE(linkMeta.init(linkMetaJson->slice(), error));
 
-  arangodb::iresearch::FieldIterator it(slice, linkMeta);
+  std::vector<std::string> EMPTY;
+  arangodb::transaction::Methods trx(
+    arangodb::transaction::StandaloneContext::Create(*s.system),
+    EMPTY, EMPTY, EMPTY,
+    arangodb::transaction::Options()
+  );
+
+  arangodb::iresearch::FieldIterator it(trx);
+  it.reset(slice, linkMeta);
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // nested.foo (with IdentityAnalyzer)
   {
@@ -1035,7 +1063,9 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
     CHECK(mangleStringIdentity("nested.foo") == value.name());
     const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
     auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
-    auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+    auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+      arangodb::iresearch::IResearchAnalyzerFeature
+    >();
     CHECK(nullptr != analyzers);
     auto const expected_features = analyzers->get("identity")->features();
     CHECK(expected_features == value.features());
@@ -1044,7 +1074,7 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // nested.foo (with EmptyAnalyzer)
   {
@@ -1058,12 +1088,14 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
   for (size_t i = 0; i < 4; ++i) {
     ++it;
     REQUIRE(it.valid());
-    REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+    REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
     auto& value = *it;
     CHECK(mangleStringIdentity("keys") == value.name());
     const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-    auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+    auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+      arangodb::iresearch::IResearchAnalyzerFeature
+    >();
     CHECK(nullptr != analyzers);
     auto const expected_features = analyzers->get("identity")->features();
     auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -1073,14 +1105,16 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // boost
   {
     auto& value = *it;
     CHECK(mangleStringIdentity("boost") == value.name());
     const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-    auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+    auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+      arangodb::iresearch::IResearchAnalyzerFeature
+    >();
     CHECK(nullptr != analyzers);
     auto const expected_features = analyzers->get("identity")->features();
     auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -1090,7 +1124,7 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // depth
   {
@@ -1102,14 +1136,16 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // fields.fieldA (with IdenityAnalyzer)
   {
     auto& value = *it;
     CHECK(mangleStringIdentity("fields.fieldA.name") == value.name());
     const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-    auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+    auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+      arangodb::iresearch::IResearchAnalyzerFeature
+    >();
     CHECK(nullptr != analyzers);
     auto const expected_features = analyzers->get("identity")->features();
     auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -1119,7 +1155,7 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // fields.fieldA (with EmptyAnalyzer)
   {
@@ -1131,14 +1167,16 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // listValuation (with IdenityAnalyzer)
   {
     auto& value = *it;
     CHECK(mangleStringIdentity("listValuation") == value.name());
     const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-    auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+    auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+      arangodb::iresearch::IResearchAnalyzerFeature
+    >();
     CHECK(nullptr != analyzers);
     auto const expected_features = analyzers->get("identity")->features();
     auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -1148,7 +1186,7 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // listValuation (with EmptyAnalyzer)
   {
@@ -1160,7 +1198,7 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // locale
   {
@@ -1172,7 +1210,7 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // array[0].id
   {
@@ -1187,14 +1225,16 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
   for (size_t i = 0; i < 3; ++i) {
     ++it;
     REQUIRE(it.valid());
-    REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+    REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
     // IdentityAnalyzer
     {
       auto& value = *it;
       CHECK(mangleStringIdentity("array[0].subarr") == value.name());
       const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-      auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+      auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+        arangodb::iresearch::IResearchAnalyzerFeature
+      >();
       CHECK(nullptr != analyzers);
       auto const expected_features = analyzers->get("identity")->features();
       auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -1204,7 +1244,7 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
     ++it;
     REQUIRE(it.valid());
-    REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+    REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
     // EmptyAnalyzer
     {
@@ -1219,14 +1259,16 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
   for (size_t i = 0; i < 3; ++i) {
     ++it;
     REQUIRE(it.valid());
-    REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+    REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
     // IdentityAnalyzer
     {
       auto& value = *it;
       CHECK(mangleStringIdentity("array[1].subarr") == value.name());
       const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-      auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+      auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+        arangodb::iresearch::IResearchAnalyzerFeature
+      >();
       CHECK(nullptr != analyzers);
       auto const expected_features = analyzers->get("identity")->features();
       auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -1236,7 +1278,7 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
     ++it;
     REQUIRE(it.valid());
-    REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+    REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
     // EmptyAnalyzer
     {
@@ -1249,14 +1291,16 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // array[1].id (IdentityAnalyzer)
   {
     auto& value = *it;
     CHECK(mangleStringIdentity("array[1].id") == value.name());
     const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-    auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+    auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+      arangodb::iresearch::IResearchAnalyzerFeature
+    >();
     CHECK(nullptr != analyzers);
     auto const expected_features = analyzers->get("identity")->features();
     auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -1266,7 +1310,7 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // array[1].id (EmptyAnalyzer)
   {
@@ -1278,7 +1322,7 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   REQUIRE(it.valid());
-  REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+  REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
   // array[2].id (IdentityAnalyzer)
   {
@@ -1292,14 +1336,16 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
   for (size_t i = 0; i < 3; ++i) {
     ++it;
     REQUIRE(it.valid());
-    REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+    REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
     // IdentityAnalyzer
     {
       auto& value = *it;
       CHECK(mangleStringIdentity("array[2].subarr") == value.name());
       const auto expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-      auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+      auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+        arangodb::iresearch::IResearchAnalyzerFeature
+      >();
       CHECK(nullptr != analyzers);
       auto const expected_features = analyzers->get("identity")->features();
       auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(value.get_tokens());
@@ -1309,7 +1355,7 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
     ++it;
     REQUIRE(it.valid());
-    REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+    REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
     // EmptyAnalyzer
     {
@@ -1322,11 +1368,11 @@ SECTION("FieldIterator_traverse_complex_object_check_meta_inheritance") {
 
   ++it;
   CHECK(!it.valid());
-  CHECK(it == arangodb::iresearch::FieldIterator::END);
+  CHECK(it == arangodb::iresearch::FieldIterator(trx));
 }
 
 SECTION("FieldIterator_nullptr_analyzer") {
-  arangodb::iresearch::IResearchAnalyzerFeature analyzers(nullptr);
+  arangodb::iresearch::IResearchAnalyzerFeature analyzers(s.server);
   auto json = arangodb::velocypack::Parser::fromJson("{ \
     \"stringValue\": \"string\" \
   }");
@@ -1344,8 +1390,8 @@ SECTION("FieldIterator_nullptr_analyzer") {
     // ensure that there will be no exception on 'emplace'
     InvalidAnalyzer::returnNullFromMake = false;
 
-    analyzers.emplace("empty", "iresearch-document-empty", "en");
-    analyzers.emplace("invalid", "iresearch-document-invalid", "en");
+    analyzers.emplace("empty", "iresearch-document-empty", "en", irs::flags{TestAttribute::type()});
+    analyzers.emplace("invalid", "iresearch-document-invalid", "en", irs::flags{TestAttribute::type()});
   }
 
   // last analyzer invalid
@@ -1358,16 +1404,26 @@ SECTION("FieldIterator_nullptr_analyzer") {
     // acquire analyzer, another one should be created
     auto analyzer = linkMeta._analyzers.back()->get(); // cached instance should have been acquired
 
-    arangodb::iresearch::FieldIterator it(slice, linkMeta);
+    std::vector<std::string> EMPTY;
+    arangodb::transaction::Methods trx(
+      arangodb::transaction::StandaloneContext::Create(*s.system),
+      EMPTY, EMPTY, EMPTY,
+      arangodb::transaction::Options()
+    );
+
+    arangodb::iresearch::FieldIterator it(trx);
+    it.reset(slice, linkMeta);
     REQUIRE(it.valid());
-    REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+    REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
     // stringValue (with IdentityAnalyzer)
     {
       auto& field = *it;
       CHECK(mangleStringIdentity("stringValue") == field.name());
       auto const expected_analyzer = irs::analysis::analyzers::get("identity", irs::text_format::json, "");
-      auto analyzers = arangodb::iresearch::getFeature<arangodb::iresearch::IResearchAnalyzerFeature>();
+      auto* analyzers = arangodb::application_features::ApplicationServer::lookupFeature<
+        arangodb::iresearch::IResearchAnalyzerFeature
+      >();
       CHECK(nullptr != analyzers);
       auto const expected_features = analyzers->get("identity")->features();
       auto& analyzer = dynamic_cast<irs::analysis::analyzer&>(field.get_tokens());
@@ -1377,7 +1433,7 @@ SECTION("FieldIterator_nullptr_analyzer") {
 
     ++it;
     REQUIRE(it.valid());
-    REQUIRE(arangodb::iresearch::FieldIterator::END != it);
+    REQUIRE(arangodb::iresearch::FieldIterator(trx) != it);
 
     // stringValue (with EmptyAnalyzer)
     {
@@ -1391,9 +1447,9 @@ SECTION("FieldIterator_nullptr_analyzer") {
 
     ++it;
     REQUIRE(!it.valid());
-    REQUIRE(arangodb::iresearch::FieldIterator::END == it);
+    REQUIRE(arangodb::iresearch::FieldIterator(trx) == it);
 
-    analyzer->reset(irs::string_ref::nil); // ensure that acquired 'analyzer' will not be optimized out
+    analyzer->reset(irs::string_ref::NIL); // ensure that acquired 'analyzer' will not be optimized out
   }
 
   // first analyzer is invalid
@@ -1405,11 +1461,19 @@ SECTION("FieldIterator_nullptr_analyzer") {
     linkMeta._includeAllFields = true; // include all fields
 
     // acquire analyzer, another one should be created
-    auto analyzer = linkMeta._analyzers.front()->get(); // cached instance should have been aquired
+    auto analyzer = linkMeta._analyzers.front()->get(); // cached instance should have been acquired
 
-    arangodb::iresearch::FieldIterator it(slice, linkMeta);
+    std::vector<std::string> EMPTY;
+    arangodb::transaction::Methods trx(
+      arangodb::transaction::StandaloneContext::Create(*s.system),
+      EMPTY, EMPTY, EMPTY,
+      arangodb::transaction::Options()
+    );
+
+    arangodb::iresearch::FieldIterator it(trx);
+    it.reset(slice, linkMeta);
     REQUIRE(it.valid());
-    REQUIRE(it != arangodb::iresearch::FieldIterator::END);
+    REQUIRE(it != arangodb::iresearch::FieldIterator(trx));
 
     // stringValue (with EmptyAnalyzer)
     {
@@ -1423,199 +1487,522 @@ SECTION("FieldIterator_nullptr_analyzer") {
 
     ++it;
     REQUIRE(!it.valid());
-    REQUIRE(arangodb::iresearch::FieldIterator::END == it);
+    REQUIRE(arangodb::iresearch::FieldIterator(trx) == it);
 
-    analyzer->reset(irs::string_ref::nil); // ensure that acquired 'analyzer' will not be optimized out
+    analyzer->reset(irs::string_ref::NIL); // ensure that acquired 'analyzer' will not be optimized out
   }
 }
 
-SECTION("DocumentPrimaryKey_encode_decode") {
-  uint64_t src = 42;
-  auto encoded = arangodb::iresearch::DocumentPrimaryKey::encode(src);
+SECTION("test_rid_encoding") {
+  auto data = arangodb::velocypack::Parser::fromJson(
+    "[{ \"rid\": 1605879230128717824},"
+    "{  \"rid\": 1605879230128717826},"
+    "{  \"rid\": 1605879230129766400},"
+    "{  \"rid\": 1605879230130814976},"
+    "{  \"rid\": 1605879230130814978},"
+    "{  \"rid\": 1605879230131863552},"
+    "{  \"rid\": 1605879230131863554},"
+    "{  \"rid\": 1605879230132912128},"
+    "{  \"rid\": 1605879230133960704},"
+    "{  \"rid\": 1605879230133960706},"
+    "{  \"rid\": 1605879230135009280},"
+    "{  \"rid\": 1605879230136057856},"
+    "{  \"rid\": 1605879230136057858},"
+    "{  \"rid\": 1605879230137106432},"
+    "{  \"rid\": 1605879230137106434},"
+    "{  \"rid\": 1605879230138155008},"
+    "{  \"rid\": 1605879230138155010},"
+    "{  \"rid\": 1605879230139203584},"
+    "{  \"rid\": 1605879230139203586},"
+    "{  \"rid\": 1605879230140252160},"
+    "{  \"rid\": 1605879230140252162},"
+    "{  \"rid\": 1605879230141300736},"
+    "{  \"rid\": 1605879230142349312},"
+    "{  \"rid\": 1605879230142349314},"
+    "{  \"rid\": 1605879230142349316},"
+    "{  \"rid\": 1605879230143397888},"
+    "{  \"rid\": 1605879230143397890},"
+    "{  \"rid\": 1605879230144446464},"
+    "{  \"rid\": 1605879230144446466},"
+    "{  \"rid\": 1605879230144446468},"
+    "{  \"rid\": 1605879230145495040},"
+    "{  \"rid\": 1605879230145495042},"
+    "{  \"rid\": 1605879230145495044},"
+    "{  \"rid\": 1605879230146543616},"
+    "{  \"rid\": 1605879230146543618},"
+    "{  \"rid\": 1605879230146543620},"
+    "{  \"rid\": 1605879230147592192}]"
+  );
 
-  CHECK((sizeof(uint64_t) == encoded.size()));
-  uint64_t dst;
-
-  CHECK((arangodb::iresearch::DocumentPrimaryKey::decode(dst, encoded)));
-  CHECK((42 == dst));
-
-  // check failure on null
-  CHECK((!arangodb::iresearch::DocumentPrimaryKey::decode(dst, irs::bytes_ref::nil)));
-
-  // check failure on incorrect size
-  CHECK((!arangodb::iresearch::DocumentPrimaryKey::decode(dst, irs::ref_cast<irs::byte_type>(irs::string_ref("abcdefghijklmnopqrstuvwxyz")))));
-}
-
-SECTION("test_appendKnownCollections") {
-  // empty reader
-  {
+  struct DataStore {
     irs::memory_directory dir;
-    auto writer = irs::index_writer::make(
-      dir, irs::formats::get("1_0"), irs::OM_CREATE
-    );
-    REQUIRE(writer);
+    irs::directory_reader reader;
+    irs::index_writer::ptr writer;
+
+    DataStore() {
+      writer = irs::index_writer::make(dir, irs::formats::get("1_0"), irs::OM_CREATE);
+      REQUIRE(writer);
+      writer->commit();
+
+      reader = irs::directory_reader::open(dir);
+    }
+  };
+
+  DataStore store0, store1;
+
+  auto const dataSlice = data->slice();
+
+  arangodb::iresearch::Field field;
+  uint64_t rid;
+
+  size_t size = 0;
+  for (auto const docSlice : arangodb::velocypack::ArrayIterator(dataSlice)) {
+    auto const ridSlice = docSlice.get("rid");
+    CHECK(ridSlice.isNumber());
+
+    rid = ridSlice.getNumber<uint64_t>();
+
+    auto pk = arangodb::iresearch::DocumentPrimaryKey::encode(arangodb::LocalDocumentId(rid));
+    auto& writer = store0.writer;
+
+    // insert document
+    {
+      auto doc = writer->documents().insert();
+      arangodb::iresearch::Field::setPkValue(field, pk);
+      CHECK(doc.insert(irs::action::index_store, field));
+      CHECK(doc);
+    }
     writer->commit();
 
-    auto reader = irs::directory_reader::open(dir);
-    REQUIRE((reader));
-    CHECK((0 == reader->size()));
-    CHECK((0 == reader->docs_count()));
-
-    std::unordered_set<TRI_voc_rid_t> actual;
-    CHECK((arangodb::iresearch::appendKnownCollections(actual, reader)));
-    CHECK((actual.empty()));
+    ++size;
   }
 
-  // write doc without 'cid'
-  {
-    irs::memory_directory dir;
-    auto writer = irs::index_writer::make(
-      dir, irs::formats::get("1_0"), irs::OM_CREATE
-    );
-    REQUIRE(writer);
+  store0.reader = store0.reader->reopen();
+  CHECK((size == store0.reader->size()));
+  CHECK((size == store0.reader->docs_count()));
 
-    TRI_voc_rid_t rid = 42;
-    arangodb::iresearch::Field field;
+  store1.writer->import(*store0.reader);
+  store1.writer->commit();
 
-    arangodb::iresearch::Field::setRidValue(field, rid, arangodb::iresearch::Field::init_stream_t());
-     writer->insert([&field](irs::segment_writer::document& doc)->bool {
-       CHECK((doc.insert(irs::action::index, field)));
-       return false; // break the loop
-    });
-    writer->commit();
+  auto reader = store1.reader->reopen();
+  REQUIRE((reader));
+  CHECK((1 == reader->size()));
+  CHECK((size == reader->docs_count()));
 
-    // check failure for empty since no such field
-    auto reader = irs::directory_reader::open(dir);
-    REQUIRE((reader));
-    CHECK((1 == reader->size()));
-    CHECK((1 == reader->docs_count()));
+  size_t found = 0;
+  for (auto const docSlice : arangodb::velocypack::ArrayIterator(dataSlice)) {
+    auto const ridSlice = docSlice.get("rid");
+    CHECK(ridSlice.isNumber());
 
-    std::unordered_set<TRI_voc_rid_t> actual;
-    CHECK((!arangodb::iresearch::appendKnownCollections(actual, reader)));
-  }
+    rid = ridSlice.getNumber<uint64_t>();
 
-  // write doc with 'cid'
-  {
-    irs::memory_directory dir;
-    auto writer = irs::index_writer::make(
-      dir, irs::formats::get("1_0"), irs::OM_CREATE
-    );
-    REQUIRE(writer);
+    auto& segment = (*reader)[0];
 
-    TRI_voc_cid_t cid = 42;
-    arangodb::iresearch::Field field;
+    auto* pkField = segment.field(arangodb::iresearch::DocumentPrimaryKey::PK());
+    CHECK(pkField);
+    CHECK(size == pkField->docs_count());
 
-    arangodb::iresearch::Field::setCidValue(field, cid, arangodb::iresearch::Field::init_stream_t());
-    writer->insert([&field](irs::segment_writer::document& doc)->bool {
-      CHECK((doc.insert(irs::action::index, field)));
-      return false; // break the loop
-    });
-    writer->commit();
+    arangodb::iresearch::PrimaryKeyFilterContainer filters;
+    CHECK(filters.empty());
+    auto& filter = filters.emplace(arangodb::LocalDocumentId(rid));
+    REQUIRE(filter.type() == arangodb::iresearch::PrimaryKeyFilter::type());
+    CHECK(!filters.empty());
 
-    auto reader = irs::directory_reader::open(dir);
-    REQUIRE((reader));
-    CHECK((1 == reader->size()));
-    CHECK((1 == reader->docs_count()));
+    // first execution
+    {
+      auto prepared = filter.prepare(*reader);
+      REQUIRE(prepared);
+      CHECK(prepared == filter.prepare(*reader)); // same object
+      CHECK(&filter == dynamic_cast<arangodb::iresearch::PrimaryKeyFilter const*>(prepared.get())); // same object
 
-    std::unordered_set<TRI_voc_rid_t> expected = { 42 };
-    std::unordered_set<TRI_voc_rid_t> actual;
-    CHECK((arangodb::iresearch::appendKnownCollections(actual, reader)));
+      for (auto& segment : *reader) {
+        auto docs = prepared->execute(segment);
+        REQUIRE(docs);
+        //CHECK((nullptr == prepared->execute(segment))); // unusable filter TRI_ASSERT(...) check
+        CHECK((irs::filter::prepared::empty() == filter.prepare(*reader))); // unusable filter (after execute)
 
-    for (auto& cid: expected) {
-      CHECK((1 == actual.erase(cid)));
+        CHECK(docs->next());
+        auto const id = docs->value();
+        ++found;
+        CHECK(!docs->next());
+        CHECK(irs::type_limits<irs::type_t::doc_id_t>::eof(docs->value()));
+        CHECK(!docs->next());
+        CHECK(irs::type_limits<irs::type_t::doc_id_t>::eof(docs->value()));
+
+        auto column = segment.column_reader(arangodb::iresearch::DocumentPrimaryKey::PK());
+        REQUIRE(column);
+
+        auto values = column->values();
+        REQUIRE(values);
+
+        irs::bytes_ref pkValue;
+        CHECK(values(id, pkValue));
+
+        arangodb::LocalDocumentId pk;
+        CHECK(arangodb::iresearch::DocumentPrimaryKey::read(pk, pkValue));
+        CHECK(rid == pk.id());
+      }
     }
 
-    CHECK((actual.empty()));
+    // FIXME uncomment after fix
+    //// can't prepare twice
+    //{
+    //  auto prepared = filter.prepare(*reader);
+    //  REQUIRE(prepared);
+    //  CHECK(prepared == filter.prepare(*reader)); // same object
+
+    //  for (auto& segment : *reader) {
+    //    auto docs = prepared->execute(segment);
+    //    REQUIRE(docs);
+    //    CHECK(docs == prepared->execute(segment)); // same object
+    //    CHECK(!docs->next());
+    //    CHECK(irs::type_limits<irs::type_t::doc_id_t>::eof(docs->value()));
+    //  }
+    //}
   }
+
+  CHECK(found == size);
 }
 
-SECTION("test_visitReaderCollections") {
-  // empty reader
-  {
+SECTION("test_rid_filter") {
+  auto data = arangodb::velocypack::Parser::fromJson(
+    "[{ \"rid\": 1605879230128717824},"
+    "{  \"rid\": 1605879230128717826},"
+    "{  \"rid\": 1605879230129766400},"
+    "{  \"rid\": 1605879230130814976},"
+    "{  \"rid\": 1605879230130814978},"
+    "{  \"rid\": 1605879230131863552},"
+    "{  \"rid\": 1605879230131863554},"
+    "{  \"rid\": 1605879230132912128},"
+    "{  \"rid\": 1605879230133960704},"
+    "{  \"rid\": 1605879230133960706},"
+    "{  \"rid\": 1605879230135009280},"
+    "{  \"rid\": 1605879230136057856},"
+    "{  \"rid\": 1605879230136057858},"
+    "{  \"rid\": 1605879230137106432},"
+    "{  \"rid\": 1605879230137106434},"
+    "{  \"rid\": 1605879230138155008},"
+    "{  \"rid\": 1605879230138155010},"
+    "{  \"rid\": 1605879230139203584},"
+    "{  \"rid\": 1605879230139203586},"
+    "{  \"rid\": 1605879230140252160},"
+    "{  \"rid\": 1605879230140252162},"
+    "{  \"rid\": 1605879230141300736},"
+    "{  \"rid\": 1605879230142349312},"
+    "{  \"rid\": 1605879230142349314},"
+    "{  \"rid\": 1605879230142349316},"
+    "{  \"rid\": 1605879230143397888},"
+    "{  \"rid\": 1605879230143397890},"
+    "{  \"rid\": 1605879230144446464},"
+    "{  \"rid\": 1605879230144446466},"
+    "{  \"rid\": 1605879230144446468},"
+    "{  \"rid\": 1605879230145495040},"
+    "{  \"rid\": 1605879230145495042},"
+    "{  \"rid\": 1605879230145495044},"
+    "{  \"rid\": 1605879230146543616},"
+    "{  \"rid\": 1605879230146543618},"
+    "{  \"rid\": 1605879230146543620},"
+    "{  \"rid\": 1605879230147592192}]"
+  );
+  auto data1 = arangodb::velocypack::Parser::fromJson("{ \"rid\": 2605879230128717824}");
+
+  struct DataStore {
     irs::memory_directory dir;
-    auto writer = irs::index_writer::make(
-      dir, irs::formats::get("1_0"), irs::OM_CREATE
-    );
-    REQUIRE(writer);
-    writer->commit();
+    irs::directory_reader reader;
+    irs::index_writer::ptr writer;
 
-    auto reader = irs::directory_reader::open(dir);
-    REQUIRE((reader));
-    CHECK((0 == reader->size()));
-    CHECK((0 == reader->docs_count()));
+    DataStore() {
+      writer = irs::index_writer::make(dir, irs::formats::get("1_0"), irs::OM_CREATE);
+      REQUIRE(writer);
+      writer->commit();
 
-    std::unordered_set<TRI_voc_rid_t> actual;
-    auto visitor = [&actual](TRI_voc_cid_t cid)->bool { actual.emplace(cid); return true; };
-    CHECK((arangodb::iresearch::visitReaderCollections(reader, visitor)));
-    CHECK((actual.empty()));
+      reader = irs::directory_reader::open(dir);
+    }
+  };
+
+  auto const dataSlice = data->slice();
+  size_t expectedDocs = 0;
+  size_t expectedLiveDocs = 0;
+  DataStore store;
+
+  // initial population
+  for (auto const docSlice: arangodb::velocypack::ArrayIterator(dataSlice)) {
+    auto const ridSlice = docSlice.get("rid");
+    CHECK((ridSlice.isNumber<uint64_t>()));
+
+    auto rid = ridSlice.getNumber<uint64_t>();
+    arangodb::iresearch::Field field;
+    auto pk = arangodb::iresearch::DocumentPrimaryKey::encode(arangodb::LocalDocumentId(rid));
+
+    // insert document
+    {
+      auto ctx = store.writer->documents();
+      auto doc = ctx.insert();
+      arangodb::iresearch::Field::setPkValue(field, pk);
+      CHECK((doc.insert(irs::action::index_store, field)));
+      CHECK((doc));
+      ++expectedDocs;
+      ++expectedLiveDocs;
+    }
   }
 
-  // write doc without 'cid'
+  // add extra doc to hold segment after others are removed
   {
-    irs::memory_directory dir;
-    auto writer = irs::index_writer::make(
-      dir, irs::formats::get("1_0"), irs::OM_CREATE
-    );
-    REQUIRE(writer);
-
-    TRI_voc_rid_t rid = 42;
     arangodb::iresearch::Field field;
-
-    arangodb::iresearch::Field::setRidValue(field, rid, arangodb::iresearch::Field::init_stream_t());
-     writer->insert([&field](irs::segment_writer::document& doc)->bool {
-       CHECK((doc.insert(irs::action::index, field)));
-       return false; // break the loop
-    });
-    writer->commit();
-
-    // check failure for empty since no such field
-    auto reader = irs::directory_reader::open(dir);
-    REQUIRE((reader));
-    CHECK((1 == reader->size()));
-    CHECK((1 == reader->docs_count()));
-
-    std::unordered_set<TRI_voc_rid_t> actual;
-    auto visitor = [&actual](TRI_voc_cid_t cid)->bool { actual.emplace(cid); return true; };
-    CHECK((!arangodb::iresearch::visitReaderCollections(reader, visitor)));
+    auto pk = arangodb::iresearch::DocumentPrimaryKey::encode(arangodb::LocalDocumentId(12345));
+    auto ctx = store.writer->documents();
+    auto doc = ctx.insert();
+    arangodb::iresearch::Field::setPkValue(field, pk);
+    CHECK((doc.insert(irs::action::index_store, field)));
+    CHECK((doc));
   }
 
-  // write doc with 'cid'
+  store.writer->commit();
+  store.reader = store.reader->reopen();
+  CHECK((1 == store.reader->size()));
+  CHECK((expectedDocs + 1 == store.reader->docs_count())); // +1 for keep-alive doc
+  CHECK((expectedLiveDocs + 1 == store.reader->live_docs_count())); // +1 for keep-alive doc
+
+  // check regular filter case (unique rid)
   {
-    irs::memory_directory dir;
-    auto writer = irs::index_writer::make(
-      dir, irs::formats::get("1_0"), irs::OM_CREATE
-    );
-    REQUIRE(writer);
+    size_t actualDocs = 0;
 
-    TRI_voc_cid_t cid = 42;
-    arangodb::iresearch::Field field;
+    for (auto const docSlice: arangodb::velocypack::ArrayIterator(dataSlice)) {
+      auto const ridSlice = docSlice.get("rid");
+      CHECK(ridSlice.isNumber<uint64_t>());
 
-    arangodb::iresearch::Field::setCidValue(field, cid, arangodb::iresearch::Field::init_stream_t());
-    writer->insert([&field](irs::segment_writer::document& doc)->bool {
-      CHECK((doc.insert(irs::action::index, field)));
-      return false; // break the loop
-    });
-    writer->commit();
+      auto rid = ridSlice.getNumber<uint64_t>();
+      arangodb::iresearch::PrimaryKeyFilterContainer filters;
+      CHECK((filters.empty()));
+      auto& filter = filters.emplace(arangodb::LocalDocumentId(rid));
+      REQUIRE((filter.type() == arangodb::iresearch::PrimaryKeyFilter::type()));
+      CHECK((!filters.empty()));
 
-    auto reader = irs::directory_reader::open(dir);
-    REQUIRE((reader));
-    CHECK((1 == reader->size()));
-    CHECK((1 == reader->docs_count()));
+      auto prepared = filter.prepare(*store.reader);
+      REQUIRE((prepared));
+      CHECK((prepared == filter.prepare(*store.reader))); // same object
+      CHECK((&filter == dynamic_cast<arangodb::iresearch::PrimaryKeyFilter const*>(prepared.get()))); // same object
 
-    std::unordered_set<TRI_voc_rid_t> expected = { 42 };
-    std::unordered_set<TRI_voc_rid_t> actual;
-    auto visitor = [&actual](TRI_voc_cid_t cid)->bool { actual.emplace(cid); return true; };
-    CHECK((arangodb::iresearch::visitReaderCollections(reader, visitor)));
+      for (auto& segment: *store.reader) {
+        auto docs = prepared->execute(segment);
+        REQUIRE((docs));
+        //CHECK((nullptr == prepared->execute(segment))); // unusable filter TRI_ASSERT(...) check
+        CHECK((irs::filter::prepared::empty() == filter.prepare(*store.reader))); // unusable filter (after execute)
 
-    for (auto& cid: expected) {
-      CHECK((1 == actual.erase(cid)));
+        CHECK((docs->next()));
+        auto const id = docs->value();
+        ++actualDocs;
+        CHECK((!docs->next()));
+        CHECK((irs::type_limits<irs::type_t::doc_id_t>::eof(docs->value())));
+        CHECK((!docs->next()));
+        CHECK((irs::type_limits<irs::type_t::doc_id_t>::eof(docs->value())));
+
+        auto column = segment.column_reader(arangodb::iresearch::DocumentPrimaryKey::PK());
+        REQUIRE((column));
+
+        auto values = column->values();
+        REQUIRE((values));
+
+        irs::bytes_ref pkValue;
+        CHECK((values(id, pkValue)));
+
+        arangodb::LocalDocumentId pk;
+        CHECK((arangodb::iresearch::DocumentPrimaryKey::read(pk, pkValue)));
+        CHECK((rid == pk.id()));
+      }
     }
 
-    CHECK((actual.empty()));
+    CHECK((expectedDocs == actualDocs));
+  }
 
-    // abort iteration by visitor
-    auto visitor_fail = [](TRI_voc_cid_t)->bool { return false; };
-    CHECK((!arangodb::iresearch::visitReaderCollections(reader, visitor_fail)));
+  // remove + insert (simulate recovery)
+  for (auto const docSlice: arangodb::velocypack::ArrayIterator(dataSlice)) {
+    auto const ridSlice = docSlice.get("rid");
+    CHECK((ridSlice.isNumber<uint64_t>()));
+
+    auto rid = ridSlice.getNumber<uint64_t>();
+    arangodb::iresearch::Field field;
+    auto pk = arangodb::iresearch::DocumentPrimaryKey::encode(arangodb::LocalDocumentId(rid));
+
+    // remove + insert document
+    {
+      auto ctx = store.writer->documents();
+      ctx.remove(std::make_shared<arangodb::iresearch::PrimaryKeyFilter>(arangodb::LocalDocumentId(rid)));
+      auto doc = ctx.insert();
+      arangodb::iresearch::Field::setPkValue(field, pk);
+      CHECK((doc.insert(irs::action::index_store, field)));
+      CHECK((doc));
+      ++expectedDocs;
+    }
+  }
+
+  // add extra doc to hold segment after others are removed
+  {
+    arangodb::iresearch::Field field;
+    auto pk = arangodb::iresearch::DocumentPrimaryKey::encode(arangodb::LocalDocumentId(123456));
+    auto ctx = store.writer->documents();
+    auto doc = ctx.insert();
+    arangodb::iresearch::Field::setPkValue(field, pk);
+    CHECK((doc.insert(irs::action::index_store, field)));
+    CHECK((doc));
+  }
+
+  store.writer->commit();
+  store.reader = store.reader->reopen();
+  CHECK((2 == store.reader->size()));
+  CHECK((expectedDocs + 2 == store.reader->docs_count())); // +2 for keep-alive doc
+  CHECK((expectedLiveDocs + 2 == store.reader->live_docs_count())); // +2 for keep-alive doc
+
+  // check 1st recovery case
+  {
+    size_t actualDocs = 0;
+
+    auto beforeRecovery = StorageEngineMock::inRecoveryResult;
+    StorageEngineMock::inRecoveryResult = true;
+    auto restoreRecovery = irs::make_finally([&beforeRecovery]()->void { StorageEngineMock::inRecoveryResult = beforeRecovery; });
+
+    for (auto const docSlice: arangodb::velocypack::ArrayIterator(dataSlice)) {
+      auto const ridSlice = docSlice.get("rid");
+      CHECK(ridSlice.isNumber<uint64_t>());
+
+      auto rid = ridSlice.getNumber<uint64_t>();
+      arangodb::iresearch::PrimaryKeyFilterContainer filters;
+      CHECK((filters.empty()));
+      auto& filter = filters.emplace(arangodb::LocalDocumentId(rid));
+      REQUIRE((filter.type() == arangodb::iresearch::PrimaryKeyFilter::type()));
+      CHECK((!filters.empty()));
+
+      auto prepared = filter.prepare(*store.reader);
+      REQUIRE((prepared));
+      CHECK((prepared == filter.prepare(*store.reader))); // same object
+      CHECK((&filter == dynamic_cast<arangodb::iresearch::PrimaryKeyFilter const*>(prepared.get()))); // same object
+
+      for (auto& segment: *store.reader) {
+        auto docs = prepared->execute(segment);
+        REQUIRE((docs));
+        CHECK((nullptr != prepared->execute(segment))); // usable filter
+        CHECK((nullptr != filter.prepare(*store.reader))); // usable filter (after execute)
+
+        if (docs->next()) { // old segments will not have any matching docs
+          auto const id = docs->value();
+          ++actualDocs;
+          CHECK((!docs->next()));
+          CHECK((irs::type_limits<irs::type_t::doc_id_t>::eof(docs->value())));
+          CHECK((!docs->next()));
+          CHECK((irs::type_limits<irs::type_t::doc_id_t>::eof(docs->value())));
+
+          auto column = segment.column_reader(arangodb::iresearch::DocumentPrimaryKey::PK());
+          REQUIRE((column));
+
+          auto values = column->values();
+          REQUIRE((values));
+
+          irs::bytes_ref pkValue;
+          CHECK((values(id, pkValue)));
+
+          arangodb::LocalDocumentId pk;
+          CHECK((arangodb::iresearch::DocumentPrimaryKey::read(pk, pkValue)));
+          CHECK((rid == pk.id()));
+        }
+      }
+    }
+
+    CHECK((expectedLiveDocs == actualDocs));
+  }
+
+  // remove + insert (simulate recovery) 2nd time
+  for (auto const docSlice: arangodb::velocypack::ArrayIterator(dataSlice)) {
+    auto const ridSlice = docSlice.get("rid");
+    CHECK((ridSlice.isNumber<uint64_t>()));
+
+    auto rid = ridSlice.getNumber<uint64_t>();
+    arangodb::iresearch::Field field;
+    auto pk = arangodb::iresearch::DocumentPrimaryKey::encode(arangodb::LocalDocumentId(rid));
+
+    // remove + insert document
+    {
+      auto ctx = store.writer->documents();
+      ctx.remove(std::make_shared<arangodb::iresearch::PrimaryKeyFilter>(arangodb::LocalDocumentId(rid)));
+      auto doc = ctx.insert();
+      arangodb::iresearch::Field::setPkValue(field, pk);
+      CHECK((doc.insert(irs::action::index_store, field)));
+      CHECK((doc));
+      ++expectedDocs;
+    }
+  }
+
+  // add extra doc to hold segment after others are removed
+  {
+    arangodb::iresearch::Field field;
+    auto pk = arangodb::iresearch::DocumentPrimaryKey::encode(arangodb::LocalDocumentId(1234567));
+    auto ctx = store.writer->documents();
+    auto doc = ctx.insert();
+    arangodb::iresearch::Field::setPkValue(field, pk);
+    CHECK((doc.insert(irs::action::index_store, field)));
+    CHECK((doc));
+  }
+
+  store.writer->commit();
+  store.reader = store.reader->reopen();
+  CHECK((3 == store.reader->size()));
+  CHECK((expectedDocs + 3 == store.reader->docs_count())); // +3 for keep-alive doc
+  CHECK((expectedLiveDocs + 3 == store.reader->live_docs_count())); // +3 for keep-alive doc
+
+  // check 2nd recovery case
+  {
+    size_t actualDocs = 0;
+
+    auto beforeRecovery = StorageEngineMock::inRecoveryResult;
+    StorageEngineMock::inRecoveryResult = true;
+    auto restoreRecovery = irs::make_finally([&beforeRecovery]()->void { StorageEngineMock::inRecoveryResult = beforeRecovery; });
+
+    for (auto const docSlice: arangodb::velocypack::ArrayIterator(dataSlice)) {
+      auto const ridSlice = docSlice.get("rid");
+      CHECK(ridSlice.isNumber<uint64_t>());
+
+      auto rid = ridSlice.getNumber<uint64_t>();
+      arangodb::iresearch::PrimaryKeyFilterContainer filters;
+      CHECK((filters.empty()));
+      auto& filter = filters.emplace(arangodb::LocalDocumentId(rid));
+      REQUIRE((filter.type() == arangodb::iresearch::PrimaryKeyFilter::type()));
+      CHECK((!filters.empty()));
+
+      auto prepared = filter.prepare(*store.reader);
+      REQUIRE((prepared));
+      CHECK((prepared == filter.prepare(*store.reader))); // same object
+      CHECK((&filter == dynamic_cast<arangodb::iresearch::PrimaryKeyFilter const*>(prepared.get()))); // same object
+
+      for (auto& segment: *store.reader) {
+        auto docs = prepared->execute(segment);
+        REQUIRE((docs));
+        CHECK((nullptr != prepared->execute(segment))); // usable filter
+        CHECK((nullptr != filter.prepare(*store.reader))); // usable filter (after execute)
+
+        if (docs->next()) { // old segments will not have any matching docs
+          auto const id = docs->value();
+          ++actualDocs;
+          CHECK((!docs->next()));
+          CHECK((irs::type_limits<irs::type_t::doc_id_t>::eof(docs->value())));
+          CHECK((!docs->next()));
+          CHECK((irs::type_limits<irs::type_t::doc_id_t>::eof(docs->value())));
+
+          auto column = segment.column_reader(arangodb::iresearch::DocumentPrimaryKey::PK());
+          REQUIRE((column));
+
+          auto values = column->values();
+          REQUIRE((values));
+
+          irs::bytes_ref pkValue;
+          CHECK((values(id, pkValue)));
+
+          arangodb::LocalDocumentId pk;
+          CHECK((arangodb::iresearch::DocumentPrimaryKey::read(pk, pkValue)));
+          CHECK((rid == pk.id()));
+        }
+      }
+    }
+
+    CHECK((expectedLiveDocs == actualDocs));
   }
 }
 

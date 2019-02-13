@@ -23,6 +23,8 @@
 
 #include "V8LineEditor.h"
 
+#include "Basics/Mutex.h"
+#include "Basics/MutexLocker.h"
 #include "Basics/StringUtils.h"
 #include "Basics/tri-strings.h"
 #include "Logger/Logger.h"
@@ -31,13 +33,15 @@
 #include "V8/v8-utils.h"
 
 using namespace arangodb;
-using namespace arangodb;
+
+namespace {
+static arangodb::Mutex singletonMutex;
+static arangodb::V8LineEditor* singleton = nullptr;
+}  // namespace
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief the active instance of the editor
 ////////////////////////////////////////////////////////////////////////////////
-
-static std::atomic<V8LineEditor*> SINGLETON(nullptr);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief signal handler for CTRL-C
@@ -53,7 +57,8 @@ static bool SignalHandler(DWORD eventType) {
     case CTRL_LOGOFF_EVENT:
     case CTRL_SHUTDOWN_EVENT: {
       // get the instance of the console
-      auto instance = SINGLETON.load();
+      MUTEX_LOCKER(mutex, ::singletonMutex);
+      auto instance = ::singleton;
 
       if (instance != nullptr) {
         if (instance->isExecutingCommand()) {
@@ -75,9 +80,10 @@ static bool SignalHandler(DWORD eventType) {
 
 #else
 
-static void SignalHandler(int signal) {
+static void SignalHandler(int /*signal*/) {
   // get the instance of the console
-  auto instance = SINGLETON.load();
+  MUTEX_LOCKER(mutex, ::singletonMutex);
+  auto instance = ::singleton;
 
   if (instance != nullptr) {
     if (instance->isExecutingCommand()) {
@@ -106,12 +112,11 @@ class V8Completer : public Completer {
   ~V8Completer() {}
 
  public:
-  bool isComplete(std::string const& source, size_t lineno) override final {
+  bool isComplete(std::string const& source, size_t /*lineno*/) override final {
     int openParen = 0;
     int openBrackets = 0;
     int openBraces = 0;
-    int openStrings =
-        0;  // only used for template strings, which can be multi-line
+    int openStrings = 0;  // only used for template strings, which can be multi-line
     int openComments = 0;
 
     enum line_parse_state_e {
@@ -313,8 +318,9 @@ class V8Completer : public Completer {
       if (funcVal->IsFunction()) {
         v8::Handle<v8::Function> func = v8::Handle<v8::Function>::Cast(funcVal);
         // assign a dummy entry to the args array even if we don't need it.
-        // this prevents "error C2466: cannot allocate an array of constant size 0" in MSVC
-        v8::Handle<v8::Value> args[] = { v8::Null(isolate) };
+        // this prevents "error C2466: cannot allocate an array of constant size
+        // 0" in MSVC
+        v8::Handle<v8::Value> args[] = {v8::Null(isolate)};
 
         try {
           v8::Handle<v8::Value> cpls = func->Call(current, 0, args);
@@ -346,8 +352,7 @@ class V8Completer : public Completer {
             std::string suffix = (current->Get(v)->IsFunction()) ? "()" : "";
             std::string name = path + s + suffix;
 
-            if (prefix.empty() || 
-                prefix[0] == '\0' || 
+            if (prefix.empty() || prefix[0] == '\0' ||
                 TRI_IsPrefixString(s, prefix.c_str())) {
               result.emplace_back(name);
             }
@@ -361,22 +366,22 @@ class V8Completer : public Completer {
     return result;
   }
 };
-}
+}  // namespace
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief constructs a new editor
 ////////////////////////////////////////////////////////////////////////////////
 
-V8LineEditor::V8LineEditor(v8::Isolate* isolate,
-                           v8::Handle<v8::Context> context,
+V8LineEditor::V8LineEditor(v8::Isolate* isolate, v8::Handle<v8::Context> context,
                            std::string const& history)
-    : LineEditor(),
-      _isolate(isolate),
-      _context(context),
-      _executingCommand(false) {
+    : LineEditor(), _isolate(isolate), _context(context), _executingCommand(false) {
   // register global instance
-  TRI_ASSERT(SINGLETON.load() == nullptr);
-  SINGLETON.store(this);
+
+  {
+    MUTEX_LOCKER(mutex, ::singletonMutex);
+    TRI_ASSERT(::singleton == nullptr);
+    ::singleton = this;
+  }
 
   // create shell
   _shell = ShellBase::buildShell(history, new V8Completer());
@@ -386,7 +391,8 @@ V8LineEditor::V8LineEditor(v8::Isolate* isolate,
   int res = SetConsoleCtrlHandler((PHANDLER_ROUTINE)SignalHandler, true);
 
   if (res == 0) {
-    LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "unable to install signal handler";
+    LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+        << "unable to install signal handler";
   }
 
 #else
@@ -395,10 +401,11 @@ V8LineEditor::V8LineEditor(v8::Isolate* isolate,
   sigemptyset(&sa.sa_mask);
   sa.sa_handler = &SignalHandler;
 
-  int res = sigaction(SIGINT, &sa, 0);
+  int res = sigaction(SIGINT, &sa, nullptr);
 
   if (res != 0) {
-    LOG_TOPIC(ERR, arangodb::Logger::FIXME) << "unable to install signal handler";
+    LOG_TOPIC(ERR, arangodb::Logger::FIXME)
+        << "unable to install signal handler";
   }
 #endif
 }
@@ -409,6 +416,7 @@ V8LineEditor::V8LineEditor(v8::Isolate* isolate,
 
 V8LineEditor::~V8LineEditor() {
   // unregister global instance
-  TRI_ASSERT(SINGLETON.load() != nullptr);
-  SINGLETON.store(nullptr);
+  MUTEX_LOCKER(mutex, ::singletonMutex);
+  TRI_ASSERT(::singleton != nullptr);
+  ::singleton = nullptr;
 }

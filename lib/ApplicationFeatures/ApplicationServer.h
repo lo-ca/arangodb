@@ -30,7 +30,9 @@
 #include <velocypack/velocypack-aliases.h>
 
 namespace arangodb {
+
 namespace options {
+
 class ProgramOptions;
 }
 
@@ -133,11 +135,19 @@ class ApplicationServer {
     return server != nullptr && server->_stopping.load();
   }
 
+  // Today this static function is a duplicate of isStopping().  The
+  //  function name 'isStopping()' is defined in other classes and
+  //  can cause scope confusion.  It also causes confusion as to when
+  //  the application versus an individual feature or thread has begun
+  //  stopping.  This function is intended to be used within communication
+  //  retry loops where infinite retries have previously blocked clean
+  //  "stopping".
+  static bool isRetryOK() { return !isStopping(); }
+
   static bool isPrepared() {
     if (server != nullptr) {
       ServerState tmp = server->_state.load(std::memory_order_relaxed);
-      return tmp == ServerState::IN_START ||
-             tmp == ServerState::IN_WAIT ||
+      return tmp == ServerState::IN_START || tmp == ServerState::IN_WAIT ||
              tmp == ServerState::IN_STOP;
     }
     return false;
@@ -147,12 +157,17 @@ class ApplicationServer {
   // throws otherwise
   template <typename T>
   static T* getFeature(std::string const& name) {
-    T* feature = dynamic_cast<T*>(
-        application_features::ApplicationServer::lookupFeature(name));
+    T* feature =
+        dynamic_cast<T*>(application_features::ApplicationServer::lookupFeature(name));
     if (feature == nullptr) {
       throwFeatureNotFoundException(name);
     }
     return feature;
+  }
+
+  template <typename T>
+  static T* getFeature() {
+    return getFeature<T>(T::name());
   }
 
   // returns the feature with the given name if known and enabled
@@ -170,8 +185,7 @@ class ApplicationServer {
   static void forceDisableFeatures(std::vector<std::string> const&);
 
  public:
-  ApplicationServer(std::shared_ptr<options::ProgramOptions>,
-                    char const* binaryPath);
+  ApplicationServer(std::shared_ptr<options::ProgramOptions>, char const* binaryPath);
 
   ~ApplicationServer();
 
@@ -226,9 +240,20 @@ class ApplicationServer {
 
   // look up a feature and return a pointer to it. may be nullptr
   static ApplicationFeature* lookupFeature(std::string const&);
-  
-  char const* getBinaryPath() { return _binaryPath;}
-  
+
+  template <typename T>
+  static T* lookupFeature(std::string const& name) {
+    typedef typename std::enable_if<std::is_base_of<ApplicationFeature, T>::value, T>::type type;
+    return dynamic_cast<type*>(lookupFeature(name));
+  }
+
+  template <typename T>
+  static T* lookupFeature() {
+    return lookupFeature<T>(T::name());
+  }
+
+  char const* getBinaryPath() { return _binaryPath; }
+
   void registerStartupCallback(std::function<void()> const& callback) {
     _startupCallbacks.emplace_back(callback);
   }
@@ -236,19 +261,22 @@ class ApplicationServer {
   void registerFailCallback(std::function<void(std::string const&)> const& callback) {
     fail = callback;
   }
-  
+
   // setup and validate all feature dependencies, determine feature order
   void setupDependencies(bool failOnMissing);
 
+  std::vector<ApplicationFeature*> const& getOrderedFeatures() {
+    return _orderedFeatures;
+  }
+
  private:
   // throws an exception that a requested feature was not found
-  static void throwFeatureNotFoundException(std::string const& name);
+  [[noreturn]] static void throwFeatureNotFoundException(std::string const& name);
 
   // throws an exception that a requested feature is not enabled
-  static void throwFeatureNotEnabledException(std::string const& name);
+  [[noreturn]] static void throwFeatureNotEnabledException(std::string const& name);
 
-  static void disableFeatures(std::vector<std::string> const& names,
-                              bool force);
+  static void disableFeatures(std::vector<std::string> const& names, bool force);
 
   // walks over all features and runs a callback function for them
   void apply(std::function<void(ApplicationFeature*)>, bool enabledOnly);
@@ -305,7 +333,7 @@ class ApplicationServer {
 
   // features order for prepare/start
   std::vector<ApplicationFeature*> _orderedFeatures;
-  
+
   // will be signalled when the application server is asked to shut down
   basics::ConditionVariable _shutdownCondition;
 
@@ -317,6 +345,9 @@ class ApplicationServer {
 
   // whether or not to dump dependencies
   bool _dumpDependencies = false;
+
+  // whether or not to dump configuration options
+  bool _dumpOptions = false;
 
   // reporter for progress
   std::vector<ProgressHandler> _progressReports;
@@ -333,7 +364,8 @@ class ApplicationServer {
   // fail callback
   std::function<void(std::string const&)> fail;
 };
-}
-}
+
+}  // namespace application_features
+}  // namespace arangodb
 
 #endif

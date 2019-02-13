@@ -29,7 +29,6 @@
 namespace arangodb {
 class GeneralRequest;
 class GeneralResponse;
-struct ConnectionInfo;
 
 namespace rest {
 class RestHandler;
@@ -40,19 +39,10 @@ class RestHandlerFactory {
 
  public:
   // handler creator
-  typedef RestHandler* (*create_fptr)(GeneralRequest*, GeneralResponse*,
-                                      void* data);
+  typedef RestHandler* (*create_fptr)(GeneralRequest*, GeneralResponse*, void* data);
 
-  // context handler
-  typedef bool (*context_fptr)(GeneralRequest*, void*);
-  
- public:
   // cppcheck-suppress *
-  RestHandlerFactory(context_fptr, void*);
-  
- public:
-  // set request context, wrapper method
-  bool setRequestContext(GeneralRequest*);
+  RestHandlerFactory() {}
 
   // creates a new handler
   RestHandler* createHandler(std::unique_ptr<GeneralRequest>,
@@ -62,29 +52,16 @@ class RestHandlerFactory {
   void addHandler(std::string const& path, create_fptr, void* data = nullptr);
 
   // adds a prefix path and constructor to the factory
-  void addPrefixHandler(std::string const& path, create_fptr,
-                        void* data = nullptr);
-
-  // adds a path and constructor to the factory
-  void addNotFoundHandler(create_fptr);
+  void addPrefixHandler(std::string const& path, create_fptr, void* data = nullptr);
 
  private:
-  // set context callback
-  context_fptr _setContext;
-
-  // set context data
-  void* _contextData;
-
   // list of constructors
   std::unordered_map<std::string, std::pair<create_fptr, void*>> _constructors;
 
   // list of prefix handlers
   std::vector<std::string> _prefixes;
-
-  // constructor for a not-found handler
-  create_fptr _notFound;
 };
-}
-}
+}  // namespace rest
+}  // namespace arangodb
 
 #endif

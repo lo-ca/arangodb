@@ -23,45 +23,46 @@
 #include "AuthenticationFeature.h"
 
 #include "ApplicationFeatures/ApplicationServer.h"
+#include "Auth/Common.h"
+#include "Auth/Handler.h"
+#include "Basics/FileUtils.h"
+#include "Basics/StringUtils.h"
 #include "Cluster/ServerState.h"
 #include "Logger/Logger.h"
 #include "ProgramOptions/ProgramOptions.h"
 #include "Random/RandomGenerator.h"
 #include "RestServer/QueryRegistryFeature.h"
-#include "Utils/Authentication.h"
 
 #if USE_ENTERPRISE
 #include "Enterprise/Ldap/LdapAuthenticationHandler.h"
 #include "Enterprise/Ldap/LdapFeature.h"
 #endif
 
-using namespace arangodb;
 using namespace arangodb::options;
+
+namespace arangodb {
 
 AuthenticationFeature* AuthenticationFeature::INSTANCE = nullptr;
 
-AuthenticationFeature::AuthenticationFeature(
-    application_features::ApplicationServer* server)
+AuthenticationFeature::AuthenticationFeature(application_features::ApplicationServer& server)
     : ApplicationFeature(server, "Authentication"),
-      _authInfo(nullptr),
+      _userManager(nullptr),
+      _authCache(nullptr),
       _authenticationUnixSockets(true),
       _authenticationSystemOnly(true),
-      _authenticationTimeout(0.0),
       _localAuthentication(true),
-      _jwtSecretProgramOption(""),
-      _active(true) {
+      _active(true),
+      _authenticationTimeout(0.0),
+      _jwtSecretProgramOption("") {
   setOptional(false);
-  requiresElevatedPrivileges(false);
-  startsAfter("Random");
+  startsAfter("BasicsPhase");
+
 #ifdef USE_ENTERPRISE
   startsAfter("Ldap");
 #endif
 }
 
-AuthenticationFeature::~AuthenticationFeature() { delete _authInfo; }
-
-void AuthenticationFeature::collectOptions(
-    std::shared_ptr<ProgramOptions> options) {
+void AuthenticationFeature::collectOptions(std::shared_ptr<ProgramOptions> options) {
   options->addSection("server", "Server features");
 
   options->addOldOption("server.disable-authentication",
@@ -79,15 +80,16 @@ void AuthenticationFeature::collectOptions(
   options->addOldOption("no-server", "server.rest-server");
 
   options->addOption("--server.authentication",
-                     "enable or disable authentication for ALL client requests",
+                     "enable authentication for ALL client requests",
                      new BooleanParameter(&_active));
 
-  options->addOption("--server.authentication-timeout",
-                     "timeout for the authentication cache (0 = indefinitely)",
-                     new DoubleParameter(&_authenticationTimeout));
+  options->addOption(
+      "--server.authentication-timeout",
+      "timeout for the authentication cache in seconds (0 = indefinitely)",
+      new DoubleParameter(&_authenticationTimeout));
 
   options->addOption("--server.local-authentication",
-                     "enable or disable authentication using the local user database",
+                     "enable authentication using the local user database",
                      new BooleanParameter(&_localAuthentication));
 
   options->addOption(
@@ -101,13 +103,41 @@ void AuthenticationFeature::collectOptions(
                      new BooleanParameter(&_authenticationUnixSockets));
 #endif
 
+  // Maybe deprecate this option in devel
   options->addOption("--server.jwt-secret",
                      "secret to use when doing jwt authentication",
-                     new StringParameter(&_jwtSecretProgramOption));
+                     new StringParameter(&_jwtSecretProgramOption))
+                     .setDeprecatedIn(30322).setDeprecatedIn(30402);
+
+  options->addOption(
+      "--server.jwt-secret-keyfile",
+      "file containing jwt secret to use when doing jwt authentication.",
+      new StringParameter(&_jwtSecretKeyfileProgramOption));
 }
 
 void AuthenticationFeature::validateOptions(std::shared_ptr<ProgramOptions>) {
-  if (!_jwtSecretProgramOption.empty()) {
+  if (!_jwtSecretKeyfileProgramOption.empty()) {
+    try {
+      // Note that the secret is trimmed for whitespace, because whitespace
+      // at the end of a file can easily happen. We do not base64-encode,
+      // though, so the bytes count as given. Zero bytes might be a problem
+      // here.
+      _jwtSecretProgramOption =
+          basics::StringUtils::trim(basics::FileUtils::slurp(_jwtSecretKeyfileProgramOption),
+                                    " \t\n\r");
+    } catch (std::exception const& ex) {
+      LOG_TOPIC(FATAL, Logger::STARTUP)
+          << "unable to read content of jwt-secret file '"
+          << _jwtSecretKeyfileProgramOption << "': " << ex.what()
+          << ". please make sure the file/directory is readable for the "
+             "arangod process and user";
+      FATAL_ERROR_EXIT();
+    }
+
+  } else if (!_jwtSecretProgramOption.empty()) {
+    LOG_TOPIC(WARN, arangodb::Logger::FIXME)
+        << "--server.jwt-secret is insecure. Use --server.jwt-secret-keyfile "
+           "instead.";
     if (_jwtSecretProgramOption.length() > _maxSecretLength) {
       LOG_TOPIC(FATAL, arangodb::Logger::FIXME)
           << "Given JWT secret too long. Max length is " << _maxSecretLength;
@@ -116,40 +146,41 @@ void AuthenticationFeature::validateOptions(std::shared_ptr<ProgramOptions>) {
   }
 }
 
-void AuthenticationFeature::generateJwtToken() {
-  VPackBuilder body;
-  body.openObject();
-  body.add("server_id", VPackValue(ServerState::instance()->getId()));
-  body.close();
-  _jwtToken = authInfo()->generateJwt(body);
-}
-
 void AuthenticationFeature::prepare() {
   TRI_ASSERT(isEnabled());
-  
-  std::unique_ptr<AuthenticationHandler> handler;
+  TRI_ASSERT(_userManager == nullptr);
+
+  ServerState::RoleEnum role = ServerState::instance()->getRole();
+  TRI_ASSERT(role != ServerState::RoleEnum::ROLE_UNDEFINED);
+  if (ServerState::isSingleServer(role) || ServerState::isCoordinator(role)) {
 #if USE_ENTERPRISE
-  if (application_features::ApplicationServer::getFeature<LdapFeature>("Ldap")
-          ->isEnabled()) {
-    handler.reset(new LdapAuthenticationHandler());
-  } else {
-    handler.reset(new DefaultAuthenticationHandler());
-  }
+    if (application_features::ApplicationServer::getFeature<LdapFeature>("Ldap")->isEnabled()) {
+      _userManager.reset(
+          new auth::UserManager(std::make_unique<LdapAuthenticationHandler>()));
+    } else {
+      _userManager.reset(new auth::UserManager());
+    }
 #else
-  handler.reset(new DefaultAuthenticationHandler());
+    _userManager.reset(new auth::UserManager());
 #endif
-  _authInfo = new AuthInfo(std::move(handler));
+  } else {
+    LOG_TOPIC(DEBUG, Logger::AUTHENTICATION) << "Not creating user manager";
+  }
+
+  TRI_ASSERT(_authCache == nullptr);
+  _authCache.reset(new auth::TokenCache(_userManager.get(), _authenticationTimeout));
 
   std::string jwtSecret = _jwtSecretProgramOption;
   if (jwtSecret.empty()) {
+    LOG_TOPIC(INFO, Logger::AUTHENTICATION)
+        << "Jwt secret not specified, generating...";
     uint16_t m = 254;
     for (size_t i = 0; i < _maxSecretLength; i++) {
       jwtSecret += (1 + RandomGenerator::interval(m));
     }
   }
-  authInfo()->setJwtSecret(jwtSecret);
-  generateJwtToken();
-  
+  _authCache->setJwtSecret(jwtSecret);
+
   INSTANCE = this;
 }
 
@@ -160,27 +191,25 @@ void AuthenticationFeature::start() {
 
   out << "Authentication is turned " << (_active ? "on" : "off");
 
-  auto queryRegistryFeature =
-      application_features::ApplicationServer::getFeature<
-          QueryRegistryFeature>("QueryRegistry");
-  _authInfo->setQueryRegistry(queryRegistryFeature->queryRegistry());
+  if (_userManager != nullptr) {
+    auto queryRegistryFeature =
+        application_features::ApplicationServer::getFeature<QueryRegistryFeature>(
+            "QueryRegistry");
+    _userManager->setQueryRegistry(queryRegistryFeature->queryRegistry());
+  }
 
   if (_active && _authenticationSystemOnly) {
     out << " (system only)";
   }
 
 #ifdef ARANGODB_HAVE_DOMAIN_SOCKETS
-    out << ", authentication for unix sockets is turned "
-        << (_authenticationUnixSockets ? "on" : "off");
+  out << ", authentication for unix sockets is turned "
+      << (_authenticationUnixSockets ? "on" : "off");
 #endif
 
   LOG_TOPIC(INFO, arangodb::Logger::AUTHENTICATION) << out.str();
 }
 
-AuthInfo* AuthenticationFeature::authInfo() const {
-  TRI_ASSERT(_authInfo != nullptr);  
-  return _authInfo;
-}
-
 void AuthenticationFeature::unprepare() { INSTANCE = nullptr; }
 
+}  // namespace arangodb

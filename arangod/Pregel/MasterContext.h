@@ -30,6 +30,8 @@
 namespace arangodb {
 namespace pregel {
 
+class Conductor;
+
 class MasterContext {
   friend class Conductor;
 
@@ -41,7 +43,7 @@ class MasterContext {
   AggregatorHandler* _aggregators = nullptr;
 
  public:
-  MasterContext(){};
+  MasterContext() {}
   virtual ~MasterContext() {}
 
   inline uint64_t globalSuperstep() const { return _globalSuperstep; }
@@ -62,7 +64,7 @@ class MasterContext {
   inline const T* getAggregatedValue(std::string const& name) {
     return (const T*)_aggregators->getAggregatedValue(name);
   }
-  
+
   template <typename T>
   inline void setAggregatedValue(std::string const& name, T const& value) {
     // FIXME refactor the aggregators, this whole API is horrible
@@ -82,20 +84,20 @@ class MasterContext {
 
   inline void enterNextGlobalSuperstep() { _enterNextGSS = true; }
 
-  virtual void preApplication(){};
+  virtual void preApplication() {}
 
   /// @brief called before supersteps
   /// @return true to continue the computation
-  virtual void preGlobalSuperstep(){};
+  virtual void preGlobalSuperstep() {}
   /// @brief called after supersteps
   /// @return true to continue the computation
   virtual bool postGlobalSuperstep() { return true; };
-  virtual void postApplication(){};
+  virtual void postApplication() {}
 
   /// Called when a worker send updated aggregator values.
   /// Only called in async mode, never called after a global superstep
   /// Can be used to decide to enter the next phase
-  virtual void postLocalSuperstep(){};
+  virtual void postLocalSuperstep() {}
 
   /// should indicate if compensation is supposed to start by returning true
   virtual bool preCompensation() { return true; }
@@ -103,6 +105,6 @@ class MasterContext {
   /// otherwise workers will be called again with the aggregated values
   virtual bool postCompensation() { return false; }
 };
-}
-}
+}  // namespace pregel
+}  // namespace arangodb
 #endif

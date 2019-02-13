@@ -41,8 +41,8 @@ class MMFilesFulltextIndex final : public MMFilesIndex {
  public:
   MMFilesFulltextIndex() = delete;
 
-  MMFilesFulltextIndex(TRI_idx_iid_t, LogicalCollection*,
-                       arangodb::velocypack::Slice const&);
+  MMFilesFulltextIndex(TRI_idx_iid_t iid, LogicalCollection& collection,
+                       arangodb::velocypack::Slice const& info);
 
   ~MMFilesFulltextIndex();
 
@@ -50,8 +50,6 @@ class MMFilesFulltextIndex final : public MMFilesIndex {
   IndexType type() const override { return Index::TRI_IDX_TYPE_FULLTEXT_INDEX; }
 
   char const* typeName() const override { return "fulltext"; }
-
-  bool allowExpansion() const override { return false; }
 
   bool canBeDropped() const override { return true; }
 
@@ -61,28 +59,23 @@ class MMFilesFulltextIndex final : public MMFilesIndex {
 
   size_t memory() const override;
 
-  void toVelocyPack(VPackBuilder&, bool withFigures,
-                    bool forPersistence) const override;
-  // Uses default toVelocyPackFigures
+  void toVelocyPack(VPackBuilder&, std::underlying_type<Serialize>::type) const override;
 
   bool matchesDefinition(VPackSlice const&) const override;
 
-  Result insert(transaction::Methods*, LocalDocumentId const& documentId,
-                arangodb::velocypack::Slice const&,
-                OperationMode mode) override;
+  Result insert(transaction::Methods& trx, LocalDocumentId const& documentId,
+                velocypack::Slice const& doc, Index::OperationMode mode) override;
 
-  Result remove(transaction::Methods*, LocalDocumentId const& documentId,
-                arangodb::velocypack::Slice const&,
-                OperationMode mode) override;
+  Result remove(transaction::Methods& trx, LocalDocumentId const& documentId,
+                velocypack::Slice const& doc, Index::OperationMode mode) override;
 
   void load() override {}
   void unload() override;
 
-  IndexIterator* iteratorForCondition(transaction::Methods*,
-                                      ManagedDocumentResult*,
+  IndexIterator* iteratorForCondition(transaction::Methods*, ManagedDocumentResult*,
                                       arangodb::aql::AstNode const*,
                                       arangodb::aql::Variable const*,
-                                      bool) override final;
+                                      IndexIteratorOptions const&) override final;
 
   bool isSame(std::string const& field, int minWordLength) const {
     std::string fieldString;
@@ -111,14 +104,9 @@ class MMFilesFulltextIndex final : public MMFilesIndex {
 /// El Cheapo index iterator
 class MMFilesFulltextIndexIterator : public IndexIterator {
  public:
-  MMFilesFulltextIndexIterator(LogicalCollection* collection,
-                               transaction::Methods* trx,
-                               ManagedDocumentResult* mmdr,
-                               MMFilesFulltextIndex const* index,
+  MMFilesFulltextIndexIterator(LogicalCollection* collection, transaction::Methods* trx,
                                std::set<TRI_voc_rid_t>&& docs)
-      : IndexIterator(collection, trx, mmdr, index),
-        _docs(std::move(docs)),
-        _pos(_docs.begin()) {}
+      : IndexIterator(collection, trx), _docs(std::move(docs)), _pos(_docs.begin()) {}
 
   ~MMFilesFulltextIndexIterator() {}
 
@@ -137,7 +125,7 @@ class MMFilesFulltextIndexIterator : public IndexIterator {
   void reset() override { _pos = _docs.begin(); }
 
   void skip(uint64_t count, uint64_t& skipped) override {
-    while (_pos != _docs.end()) {
+    while (_pos != _docs.end() && skipped < count) {
       ++_pos;
       skipped++;
     }
@@ -147,6 +135,6 @@ class MMFilesFulltextIndexIterator : public IndexIterator {
   std::set<TRI_voc_rid_t> const _docs;
   std::set<TRI_voc_rid_t>::iterator _pos;
 };
-}
+}  // namespace arangodb
 
 #endif

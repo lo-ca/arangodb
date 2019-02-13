@@ -86,12 +86,12 @@ by_range::by_range() NOEXCEPT
   : filter(by_range::type()) {
 }
 
-bool by_range::equals(const filter& rhs) const {
+bool by_range::equals(const filter& rhs) const NOEXCEPT {
   const by_range& trhs = static_cast<const by_range&>(rhs);
   return filter::equals(rhs) && fld_ == trhs.fld_ && rng_ == trhs.rng_;
 }
 
-size_t by_range::hash() const {
+size_t by_range::hash() const NOEXCEPT {
   size_t seed = 0;
   ::boost::hash_combine(seed, filter::hash());
   ::boost::hash_combine(seed, fld_);
@@ -192,12 +192,12 @@ filter::prepared::ptr by_range::prepare(
 
   scorer.score(index, ord);
 
-  auto q = memory::make_unique<range_query>(std::move(states));
+  auto q = memory::make_shared<range_query>(std::move(states));
 
   // apply boost
   irs::boost::apply(q->attributes(), this->boost() * boost);
 
-  return IMPLICIT_MOVE_WORKAROUND(q);
+  return q;
 }
 
 NS_END // ROOT

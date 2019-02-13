@@ -22,13 +22,31 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include "CursorRepository.h"
+
+#include "Aql/QueryCursor.h"
 #include "Basics/MutexLocker.h"
 #include "Logger/Logger.h"
+#include "Utils/ExecContext.h"
 #include "VocBase/ticks.h"
 #include "VocBase/vocbase.h"
 
 #include <velocypack/Builder.h>
 #include <velocypack/velocypack-aliases.h>
+
+namespace {
+bool authorized(std::pair<arangodb::Cursor*, std::string> const& cursor) {
+  auto context = arangodb::ExecContext::CURRENT;
+  if (context == nullptr || !arangodb::ExecContext::isAuthEnabled()) {
+    return true;
+  }
+
+  if (context->isSuperuser()) {
+    return true;
+  }
+
+  return (cursor.second == context->user());
+}
+}  // namespace
 
 using namespace arangodb;
 
@@ -38,7 +56,7 @@ size_t const CursorRepository::MaxCollectCount = 32;
 /// @brief create a cursor repository
 ////////////////////////////////////////////////////////////////////////////////
 
-CursorRepository::CursorRepository(TRI_vocbase_t* vocbase)
+CursorRepository::CursorRepository(TRI_vocbase_t& vocbase)
     : _vocbase(vocbase), _lock(), _cursors() {
   _cursors.reserve(64);
 }
@@ -62,12 +80,14 @@ CursorRepository::~CursorRepository() {
     }
 
     if (tries == 0) {
-      LOG_TOPIC(INFO, arangodb::Logger::FIXME) << "waiting for used cursors to become unused";
+      LOG_TOPIC(INFO, arangodb::Logger::FIXME)
+          << "waiting for used cursors to become unused";
     } else if (tries == 120) {
-      LOG_TOPIC(WARN, arangodb::Logger::FIXME) << "giving up waiting for unused cursors";
+      LOG_TOPIC(WARN, arangodb::Logger::FIXME)
+          << "giving up waiting for unused cursors";
     }
 
-    std::this_thread::sleep_for(std::chrono::microseconds(500000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     ++tries;
   }
 
@@ -75,7 +95,7 @@ CursorRepository::~CursorRepository() {
     MUTEX_LOCKER(mutexLocker, _lock);
 
     for (auto it : _cursors) {
-      delete it.second;
+      delete it.second.first;
     }
 
     _cursors.clear();
@@ -92,10 +112,11 @@ Cursor* CursorRepository::addCursor(std::unique_ptr<Cursor> cursor) {
   TRI_ASSERT(cursor->isUsed());
 
   CursorId const id = cursor->id();
+  std::string user = ExecContext::CURRENT ? ExecContext::CURRENT->user() : "";
 
   {
     MUTEX_LOCKER(mutexLocker, _lock);
-    _cursors.emplace(id, cursor.get());
+    _cursors.emplace(id, std::make_pair(cursor.get(), user));
   }
 
   return cursor.release();
@@ -105,19 +126,41 @@ Cursor* CursorRepository::addCursor(std::unique_ptr<Cursor> cursor) {
 /// @brief creates a cursor and stores it in the registry
 /// the cursor will be returned with the usage flag set to true. it must be
 /// returned later using release()
-/// the cursor will take ownership of both json and extra
+/// the cursor will take ownership and retain the entire QueryResult object
 ////////////////////////////////////////////////////////////////////////////////
 
-Cursor* CursorRepository::createFromQueryResult(
-    aql::QueryResult&& result, size_t batchSize, std::shared_ptr<VPackBuilder> extra,
-    double ttl, bool count) {
+Cursor* CursorRepository::createFromQueryResult(aql::QueryResult&& result, size_t batchSize,
+                                                double ttl, bool hasCount) {
   TRI_ASSERT(result.result != nullptr);
 
-  CursorId const id = TRI_NewTickServer();
+  CursorId const id = TRI_NewServerSpecificTick();  // embedded server id
+  TRI_ASSERT(id != 0);
+  std::unique_ptr<Cursor> cursor(
+      new aql::QueryResultCursor(_vocbase, id, std::move(result), batchSize, ttl, hasCount));
+  cursor->use();
 
-  std::unique_ptr<Cursor> cursor;
-  cursor.reset(new VelocyPackCursor(
-      _vocbase, id, std::move(result), batchSize, extra, ttl, count));
+  return addCursor(std::move(cursor));
+}
+
+//////////////////////////////////////////////////////////////////////////////
+/// @brief creates a cursor and stores it in the registry
+/// the cursor will be returned with the usage flag set to true. it must be
+/// returned later using release()
+/// the cursor will create a query internally and retain it until deleted
+//////////////////////////////////////////////////////////////////////////////
+
+Cursor* CursorRepository::createQueryStream(std::string const& query,
+                                            std::shared_ptr<VPackBuilder> const& binds,
+                                            std::shared_ptr<VPackBuilder> const& opts,
+                                            size_t batchSize, double ttl,
+                                            bool contextOwnedByExterior) {
+  TRI_ASSERT(!query.empty());
+
+  CursorId const id = TRI_NewServerSpecificTick();  // embedded server id
+  TRI_ASSERT(id != 0);
+  auto cursor = std::make_unique<aql::QueryStreamCursor>(_vocbase, id, query, binds,
+                                                         opts, batchSize, ttl,
+                                                         contextOwnedByExterior);
   cursor->use();
 
   return addCursor(std::move(cursor));
@@ -134,12 +177,12 @@ bool CursorRepository::remove(CursorId id, Cursor::CursorType type) {
     MUTEX_LOCKER(mutexLocker, _lock);
 
     auto it = _cursors.find(id);
-    if (it == _cursors.end()) {
+    if (it == _cursors.end() || !::authorized(it->second)) {
       // not found
       return false;
     }
 
-    cursor = (*it).second;
+    cursor = (*it).second.first;
 
     if (cursor->isDeleted()) {
       // already deleted
@@ -153,7 +196,7 @@ bool CursorRepository::remove(CursorId id, Cursor::CursorType type) {
 
     if (cursor->isUsed()) {
       // cursor is in use by someone else. now mark as deleted
-      cursor->deleted();
+      cursor->setDeleted();
       return true;
     }
 
@@ -181,12 +224,12 @@ Cursor* CursorRepository::find(CursorId id, Cursor::CursorType type, bool& busy)
     MUTEX_LOCKER(mutexLocker, _lock);
 
     auto it = _cursors.find(id);
-    if (it == _cursors.end()) {
+    if (it == _cursors.end() || !::authorized(it->second)) {
       // not found
       return nullptr;
     }
 
-    cursor = (*it).second;
+    cursor = (*it).second.first;
 
     if (cursor->isDeleted()) {
       // already deleted
@@ -240,7 +283,7 @@ bool CursorRepository::containsUsedCursor() {
   MUTEX_LOCKER(mutexLocker, _lock);
 
   for (auto it : _cursors) {
-    if (it.second->isUsed()) {
+    if (it.second.first->isUsed()) {
       return true;
     }
   }
@@ -262,7 +305,7 @@ bool CursorRepository::garbageCollect(bool force) {
     MUTEX_LOCKER(mutexLocker, _lock);
 
     for (auto it = _cursors.begin(); it != _cursors.end(); /* no hoisting */) {
-      auto cursor = (*it).second;
+      auto cursor = (*it).second.first;
 
       if (cursor->isUsed()) {
         // must not destroy used cursors
@@ -271,7 +314,8 @@ bool CursorRepository::garbageCollect(bool force) {
       }
 
       if (force || cursor->expires() < now) {
-        cursor->deleted();
+        cursor->kill();
+        cursor->setDeleted();
       }
 
       if (cursor->isDeleted()) {

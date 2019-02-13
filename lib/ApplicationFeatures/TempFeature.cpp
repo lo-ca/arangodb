@@ -23,22 +23,21 @@
 #include "ApplicationFeatures/TempFeature.h"
 
 #include "Basics/ArangoGlobalContext.h"
-#include "Basics/files.h"
 #include "Basics/FileUtils.h"
+#include "Basics/files.h"
 #include "Logger/Logger.h"
 #include "ProgramOptions/ProgramOptions.h"
 #include "ProgramOptions/Section.h"
 
-using namespace arangodb;
 using namespace arangodb::options;
 
-TempFeature::TempFeature(application_features::ApplicationServer* server,
+namespace arangodb {
+
+TempFeature::TempFeature(application_features::ApplicationServer& server,
                          std::string const& appname)
     : ApplicationFeature(server, "Temp"), _path(), _appname(appname) {
   setOptional(false);
-  requiresElevatedPrivileges(false);
-  startsAfter("Logger");
-  startsAfter("Random");
+  startsAfter("GreetingsPhase");
 }
 
 void TempFeature::collectOptions(std::shared_ptr<ProgramOptions> options) {
@@ -71,3 +70,5 @@ void TempFeature::start() {
     context->createMiniDumpFilename();
   }
 }
+
+}  // namespace arangodb

@@ -23,24 +23,63 @@
 
 #include "StringUtils.h"
 
+#include <ctype.h>
+#include <stdio.h>
+#include <algorithm>
+#include <limits>
+#include <vector>
+
 #include <math.h>
 #include <time.h>
 
 #include "Basics/Exceptions.h"
-#include "Basics/tri-strings.h"
 #include "Basics/StringBuffer.h"
 #include "Basics/fpconv.h"
+#include "Basics/tri-strings.h"
 #include "Logger/Logger.h"
 
+#include "zconf.h"
 #include "zlib.h"
-#include "zconf.h"  
 
 // -----------------------------------------------------------------------------
 // helper functions
 // -----------------------------------------------------------------------------
 
 namespace {
-bool isSpace(char a) { return a == ' ' || a == '\t' || a == '_'; }
+
+static char const* hexValuesLower = "0123456789abcdef";
+static char const* hexValuesUpper = "0123456789ABCDEF";
+
+char soundexCode(char c) {
+  switch (c) {
+    case 'b':
+    case 'f':
+    case 'p':
+    case 'v':
+      return '1';
+    case 'c':
+    case 'g':
+    case 'j':
+    case 'k':
+    case 'q':
+    case 's':
+    case 'x':
+    case 'z':
+      return '2';
+    case 'd':
+    case 't':
+      return '3';
+    case 'l':
+      return '4';
+    case 'm':
+    case 'n':
+      return '5';
+    case 'r':
+      return '6';
+    default:
+      return '\0';
+  }
+}
 
 char const* const BASE64_CHARS =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -130,241 +169,87 @@ inline bool isBase64U(unsigned char c) {
   return (isalnum(c) || (c == '-') || (c == '_'));
 }
 
-bool parseHexanumber(char const* inputStr, size_t len, uint32_t* outputInt) {
-  uint32_t const charVal[16] = {0, 1, 2,  3,  4,  5,  6,  7,
-                                8, 9, 10, 11, 12, 13, 14, 15};
-  bool ok = true;
-  for (size_t j = 0; j < len; j++) {
-    if (inputStr[j] > '/' && inputStr[j] < ':') {
-      *outputInt = (*outputInt << 4) | charVal[inputStr[j] - 48];
-    } else if (inputStr[j] > '@' && inputStr[j] < 'G') {
-      *outputInt = (*outputInt << 4) | charVal[inputStr[j] - 55];
-    } else if (inputStr[j] > '`' && inputStr[j] < 'g') {
-      *outputInt = (*outputInt << 4) | charVal[inputStr[j] - 87];
-    } else {
-      // invalid sequence of characters received for now simply return whatever
-      // we received
-      // *outputStr = std::string(inputStr,len);
-      ok = false;
-      break;
+unsigned char consume(char const*& s) {
+  return *reinterpret_cast<unsigned char const*>(s++);
+}
+
+template <typename InputType>
+inline bool isEqual(InputType const& c1, InputType const& c2) {
+  return c1 == c2;
+}
+
+template <typename InputType, typename LengthType>
+LengthType levenshtein(InputType const* lhs, InputType const* rhs,
+                       LengthType lhsSize, LengthType rhsSize) {
+  TRI_ASSERT(lhsSize >= rhsSize);
+
+  std::vector<LengthType> costs;
+  costs.resize(rhsSize + 1);
+
+  for (LengthType i = 0; i < rhsSize; ++i) {
+    costs[i] = i;
+  }
+
+  LengthType next = 0;
+
+  for (LengthType i = 0; i < lhsSize; ++i) {
+    LengthType current = i + 1;
+
+    for (LengthType j = 0; j < rhsSize; ++j) {
+      LengthType cost = !(::isEqual<InputType>(lhs[i], rhs[j]) ||
+                          (i && j && ::isEqual<InputType>(lhs[i - 1], rhs[j]) &&
+                           ::isEqual<InputType>(lhs[i], rhs[j - 1])));
+      next = std::min(std::min(costs[j + 1] + 1, current + 1), costs[j] + cost);
+      costs[j] = current;
+      current = next;
     }
+    costs[rhsSize] = next;
   }
-  return ok;
-}
-///-------------------------------------------------------
-/// @brief computes the unicode value of an ut16 symbol
-///-------------------------------------------------------
-
-bool toUnicode(uint16_t w1, uint16_t w2, uint32_t* v) {
-  uint32_t vh = w1 - 0xD800;
-  uint32_t vl = w2 - 0xDC00;
-  uint32_t vp = (vh << 10) | vl;
-  *v = vp + 0x10000;
-  return true;
+  return next;
 }
 
-bool toUtf8(uint32_t outputInt, std::string& outputStr) {
-  if ((outputInt >> 7) == 0) {
-    outputStr.append(1, (char)(outputInt));
+size_t levenshteinDistance(std::vector<uint32_t>& vect1, std::vector<uint32_t>& vect2) {
+  if (vect1.empty() || vect2.empty()) {
+    return vect1.size() ? vect1.size() : vect2.size();
   }
-  // unicode sequence is in the range \u0080 to \u07ff
-  else if ((outputInt >> 11) == 0) {
-    outputStr.append(1, (char)((3 << 6) | (outputInt >> 6)));
-    outputStr.append(1, (char)((1 << 7) | (outputInt & 63)));
+
+  if (vect1.size() < vect2.size()) {
+    vect1.swap(vect2);
   }
-  // unicode sequence is in the range \u0800 to \uffff
-  else if ((outputInt >> 16) == 0) {
-    outputStr.append(1, (char)((7 << 5) | (outputInt >> 12)));
-    outputStr.append(
-        1, (char)((1 << 7) | ((outputInt & 4095 /* 2^12 - 1*/) >> 6)));
-    outputStr.append(1, (char)((1 << 7) | (outputInt & 63)));
-  } else if ((outputInt >> 21) == 0) {
-    outputStr.append(1, (char)((15 << 4) | (outputInt >> 18)));
-    outputStr.append(
-        1, (char)((1 << 7) | ((outputInt & 262143 /* 2^18 - 1*/) >> 12)));
-    outputStr.append(
-        1, (char)((1 << 7) | ((outputInt & 4095 /* 2^12 - 1*/) >> 6)));
-    outputStr.append(1, (char)((1 << 7) | ((outputInt & 63))));
-  } else {
-    // can't handle it yet (need 5,6 etc utf8 characters), just send back the
-    // string we got
-    return false;
+
+  size_t lhsSize = vect1.size();
+  size_t rhsSize = vect2.size();
+
+  uint32_t const* l = vect1.data();
+  uint32_t const* r = vect2.data();
+
+  if (lhsSize < std::numeric_limits<uint8_t>::max()) {
+    return static_cast<size_t>(
+        ::levenshtein<uint32_t, uint8_t>(l, r, static_cast<uint8_t>(lhsSize),
+                                         static_cast<uint8_t>(rhsSize)));
+  } else if (lhsSize < std::numeric_limits<uint16_t>::max()) {
+    return static_cast<size_t>(
+        ::levenshtein<uint32_t, uint16_t>(l, r, static_cast<uint16_t>(lhsSize),
+                                          static_cast<uint16_t>(rhsSize)));
+  } else if (lhsSize < std::numeric_limits<uint32_t>::max()) {
+    return static_cast<size_t>(
+        ::levenshtein<uint32_t, uint32_t>(l, r, static_cast<uint32_t>(lhsSize),
+                                          static_cast<uint32_t>(rhsSize)));
   }
-  return true;
+  return static_cast<size_t>(
+      ::levenshtein<uint32_t, uint64_t>(l, r, static_cast<uint64_t>(lhsSize),
+                                        static_cast<uint64_t>(rhsSize)));
 }
-///-------------------------------------------------------
-/// @brief true when number lays in the range
-///        U+D800  U+DBFF
-///-------------------------------------------------------
-bool isHighSurrugate(uint32_t number) {
-  return (number >= 0xD800) && (number <= 0xDBFF);
-}
-///-------------------------------------------------------
-/// @brief true when number lays in the range
-///        U+DC00  U+DFFF
-bool isLowSurrugate(uint32_t number) {
-  return (number >= 0xDC00) && (number <= 0xDFFF);
-}
-}
+
+}  // namespace
 
 namespace arangodb {
 namespace basics {
 namespace StringUtils {
 
-char* duplicate(std::string const& source) {
-  size_t len = source.size();
-  char* result = new char[len + 1];
-
-  memcpy(result, source.c_str(), len);
-  result[len] = '\0';
-
-  return result;
-}
-
-char* duplicate(char const* source, size_t len) {
-  if (source == 0) {
-    return 0;
-  }
-
-  char* result = new char[len + 1];
-
-  memcpy(result, source, len);
-  result[len] = '\0';
-
-  return result;
-}
-
-char* duplicate(char const* source) {
-  if (source == 0) {
-    return 0;
-  }
-  size_t len = strlen(source);
-  char* result = new char[len + 1];
-
-  memcpy(result, source, len);
-  result[len] = '\0';
-
-  return result;
-}
-
-void destroy(char*& source) {
-  if (source != 0) {
-    ::memset(source, 0, ::strlen(source));
-    delete[] source;
-    source = 0;
-  }
-}
-
-void destroy(char*& source, size_t length) {
-  if (source != 0) {
-    ::memset(source, 0, length);
-    delete[] source;
-    source = 0;
-  }
-}
-
-void erase(char*& source) {
-  if (source != 0) {
-    delete[] source;
-    source = 0;
-  }
-}
-
 // .............................................................................
 // STRING CONVERSION
 // .............................................................................
-
-std::string capitalize(std::string const& name, bool first) {
-  size_t len = name.length();
-
-  if (len == 0) {
-    std::string message("name must not be empty");
-    THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_BAD_PARAMETER, message);
-  }
-
-  char* buffer = new char[len + 1];
-  char* qtr = buffer;
-  char const* ptr = name.c_str();
-
-  for (; 0 < len && isSpace(*ptr); len--, ptr++) {
-  }
-
-  if (len == 0) {
-    std::string message("object or attribute name must not be empty");
-    THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_BAD_PARAMETER, message);
-  }
-
-  bool upper = first;
-
-  for (; 0 < len; len--, ptr++) {
-    if (isSpace(*ptr)) {
-      upper = true;
-    } else {
-      if (upper) {
-        *qtr++ = static_cast<char>(::toupper(*ptr));
-      } else {
-        *qtr++ = static_cast<char>(::tolower(*ptr));
-      }
-      upper = false;
-    }
-  }
-
-  *qtr = '\0';
-
-  std::string result(buffer);
-
-  delete[] buffer;
-
-  return result;
-}
-
-std::string separate(std::string const& name, char separator) {
-  size_t len = name.length();
-
-  if (len == 0) {
-    std::string message("name must not be empty");
-    THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_BAD_PARAMETER, message);
-  }
-
-  char* buffer = new char[len + 1];
-  char* qtr = buffer;
-  char const* ptr = name.c_str();
-
-  for (; 0 < len && isSpace(*ptr); len--, ptr++) {
-  }
-
-  if (len == 0) {
-    std::string message("name must not be empty");
-    THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_BAD_PARAMETER, message);
-  }
-
-  bool useSeparator = false;
-
-  for (; 0 < len; len--, ptr++) {
-    for (; 0 < len && isSpace(*ptr); len--, ptr++) {
-      useSeparator = true;
-    }
-
-    if (0 < len) {
-      if (useSeparator) {
-        *qtr++ = separator;
-        useSeparator = false;
-      }
-
-      *qtr++ = static_cast<char>(::tolower(*ptr));
-    } else {
-      break;
-    }
-  }
-
-  *qtr = '\0';
-
-  std::string result(buffer);
-
-  delete[] buffer;
-
-  return result;
-}
 
 std::string escapeUnicode(std::string const& name, bool escapeSlash) {
   size_t len = name.length();
@@ -551,243 +436,14 @@ std::string escapeUnicode(std::string const& name, bool escapeSlash) {
   delete[] buffer;
 
   if (corrupted) {
-    LOG_TOPIC(WARN, arangodb::Logger::FIXME) << "escaped corrupted unicode string";
+    LOG_TOPIC(WARN, arangodb::Logger::FIXME)
+        << "escaped corrupted unicode string";
   }
 
   return result;
 }
 
-std::string escapeHtml(std::string const& name) {
-  size_t len = name.length();
-
-  if (len == 0) {
-    return name;
-  }
-
-  if (len >= (SIZE_MAX - 1) / 8) {
-    THROW_ARANGO_EXCEPTION(TRI_ERROR_OUT_OF_MEMORY);
-  }
-
-  char* buffer = new char[8 * len + 1];
-  char* qtr = buffer;
-  char const* ptr = name.c_str();
-  char const* end = ptr + len;
-
-  for (; ptr < end; ++ptr, ++qtr) {
-    if (*ptr == '<') {
-      *qtr++ = '&';
-      *qtr++ = 'l';
-      *qtr++ = 't';
-      *qtr = ';';
-    } else if (*ptr == '>') {
-      *qtr++ = '&';
-      *qtr++ = 'g';
-      *qtr++ = 't';
-      *qtr = ';';
-    } else if (*ptr == '&') {
-      *qtr++ = '&';
-      *qtr++ = 'a';
-      *qtr++ = 'm';
-      *qtr++ = 'p';
-      *qtr = ';';
-    } else if (*ptr == '"') {
-      *qtr++ = '&';
-      *qtr++ = 'q';
-      *qtr++ = 'u';
-      *qtr++ = 'o';
-      *qtr++ = 't';
-      *qtr = ';';
-    } else {
-      *qtr = *ptr;
-    }
-  }
-
-  *qtr = '\0';
-
-  std::string result(buffer, qtr - buffer);
-
-  delete[] buffer;
-
-  return result;
-}
-
-std::string escapeXml(std::string const& name) { return escapeHtml(name); }
-
-std::string escapeHex(std::string const& name, char quote) {
-  size_t len = name.length();
-
-  if (len == 0) {
-    return name;
-  }
-
-  if (len >= (SIZE_MAX - 1) / 3) {
-    THROW_ARANGO_EXCEPTION(TRI_ERROR_OUT_OF_MEMORY);
-  }
-
-  char* buffer = new char[3 * len + 1];
-  char* qtr = buffer;
-  char const* ptr = name.c_str();
-  char const* end = ptr + len;
-
-  for (; ptr < end; ptr++, qtr++) {
-    if (*ptr == quote || *ptr <= ' ' || static_cast<uint8_t>(*ptr) >= 128) {
-      uint8_t n = (uint8_t)(*ptr);
-      uint8_t n1 = n >> 4;
-      uint8_t n2 = n & 0x0F;
-
-      *qtr++ = quote;
-      *qtr++ = (n1 < 10) ? ('0' + n1) : ('A' + n1 - 10);
-      *qtr = (n2 < 10) ? ('0' + n2) : ('A' + n2 - 10);
-    } else {
-      *qtr = *ptr;
-    }
-  }
-
-  *qtr = '\0';
-
-  std::string result(buffer, qtr - buffer);
-
-  delete[] buffer;
-
-  return result;
-}
-
-std::string escapeHex(std::string const& name, std::string const& special,
-                      char quote) {
-  size_t len = name.length();
-
-  if (len == 0) {
-    return name;
-  }
-
-  if (len >= (SIZE_MAX - 1) / 3) {
-    THROW_ARANGO_EXCEPTION(TRI_ERROR_OUT_OF_MEMORY);
-  }
-
-  char* buffer = new char[3 * len + 1];
-  char* qtr = buffer;
-  char const* ptr = name.c_str();
-  char const* end = ptr + len;
-
-  if (special.length() == 0) {
-    for (; ptr < end; ptr++, qtr++) {
-      if (*ptr == quote) {
-        uint8_t n = (uint8_t)(*ptr);
-        uint8_t n1 = n >> 4;
-        uint8_t n2 = n & 0x0F;
-
-        *qtr++ = quote;
-        *qtr++ = (n1 < 10) ? ('0' + n1) : ('A' + n1 - 10);
-        *qtr = (n2 < 10) ? ('0' + n2) : ('A' + n2 - 10);
-      } else {
-        *qtr = *ptr;
-      }
-    }
-  } else if (special.length() == 1) {
-    char s = special[0];
-
-    for (; ptr < end; ptr++, qtr++) {
-      if (*ptr == quote || *ptr == s) {
-        uint8_t n = (uint8_t)(*ptr);
-        uint8_t n1 = n >> 4;
-        uint8_t n2 = n & 0x0F;
-
-        *qtr++ = quote;
-        *qtr++ = (n1 < 10) ? ('0' + n1) : ('A' + n1 - 10);
-        *qtr = (n2 < 10) ? ('0' + n2) : ('A' + n2 - 10);
-      } else {
-        *qtr = *ptr;
-      }
-    }
-  } else {
-    for (; ptr < end; ptr++, qtr++) {
-      if (*ptr == quote || special.find(*ptr) != std::string::npos) {
-        uint8_t n = (uint8_t)(*ptr);
-        uint8_t n1 = n >> 4;
-        uint8_t n2 = n & 0x0F;
-
-        *qtr++ = quote;
-        *qtr++ = (n1 < 10) ? ('0' + n1) : ('A' + n1 - 10);
-        *qtr = (n2 < 10) ? ('0' + n2) : ('A' + n2 - 10);
-      } else {
-        *qtr = *ptr;
-      }
-    }
-  }
-
-  *qtr = '\0';
-
-  std::string result(buffer, qtr - buffer);
-
-  delete[] buffer;
-
-  return result;
-}
-
-std::string escapeC(std::string const& name) {
-  size_t len = name.length();
-
-  if (len == 0) {
-    return name;
-  }
-
-  if (len >= (SIZE_MAX - 1) / 4) {
-    THROW_ARANGO_EXCEPTION(TRI_ERROR_OUT_OF_MEMORY);
-  }
-
-  char* buffer = new char[4 * len + 1];
-  char* qtr = buffer;
-  char const* ptr = name.c_str();
-  char const* end = ptr + len;
-
-  for (; ptr < end; ptr++, qtr++) {
-    uint8_t n = (uint8_t)(*ptr);
-
-    switch (*ptr) {
-      case '\n':
-        *qtr++ = '\\';
-        *qtr = 'n';
-        break;
-
-      case '\r':
-        *qtr++ = '\\';
-        *qtr = 'r';
-        break;
-
-      case '\'':
-      case '"':
-        *qtr++ = '\\';
-        *qtr = *ptr;
-        break;
-
-      default:
-        if (n < 32 || n > 127) {
-          uint8_t n1 = n >> 4;
-          uint8_t n2 = n & 0x0F;
-
-          *qtr++ = '\\';
-          *qtr++ = 'x';
-          *qtr++ = (n1 < 10) ? ('0' + n1) : ('A' + n1 - 10);
-          *qtr = (n2 < 10) ? ('0' + n2) : ('A' + n2 - 10);
-        } else {
-          *qtr = *ptr;
-        }
-
-        break;
-    }
-  }
-
-  *qtr = '\0';
-
-  std::string result(buffer, qtr - buffer);
-
-  delete[] buffer;
-
-  return result;
-}
-
-std::vector<std::string> split(std::string const& source, char delim,
-                               char quote) {
+std::vector<std::string> split(std::string const& source, char delim, char quote) {
   std::vector<std::string> result;
 
   if (source.empty()) {
@@ -1064,7 +720,7 @@ std::string tolower(std::string&& str) {
     str[i] = static_cast<char>(::tolower(str[i]));
   }
 
-  return str;
+  return std::move(str);
 }
 
 std::string tolower(std::string const& str) {
@@ -1074,17 +730,14 @@ std::string tolower(std::string const& str) {
     return "";
   }
 
-  char* buffer = new char[len];
-  char* qtr = buffer;
+  std::string result;
+  result.reserve(len);
+
   char const* ptr = str.c_str();
 
-  for (; 0 < len; len--, ptr++, qtr++) {
-    *qtr = static_cast<char>(::tolower(*ptr));
+  for (; 0 < len; len--, ptr++) {
+    result.push_back(static_cast<char>(::tolower(*ptr)));
   }
-
-  std::string result(buffer, str.size());
-
-  delete[] buffer;
 
   return result;
 }
@@ -1108,16 +761,15 @@ std::string toupper(std::string const& str) {
     return "";
   }
 
-  char* buffer = new char[len];
-  char* qtr = buffer;
+  std::string result;
+  result.reserve(len);
+
   char const* ptr = str.c_str();
 
-  for (; 0 < len; len--, ptr++, qtr++) {
-    *qtr = static_cast<char>(::toupper(*ptr));
+  for (; 0 < len; len--, ptr++) {
+    result.push_back(static_cast<char>(::toupper(*ptr)));
   }
 
-  std::string result(buffer, str.size());
-  delete[] buffer;
   return result;
 }
 
@@ -1137,15 +789,14 @@ bool isSuffix(std::string const& str, std::string const& postfix) {
   } else if (postfix.length() == str.length()) {
     return str == postfix;
   } else {
-    return str.compare(str.size() - postfix.length(), postfix.length(),
-                       postfix) == 0;
+    return str.compare(str.size() - postfix.length(), postfix.length(), postfix) == 0;
   }
 }
 
 std::string urlDecodePath(std::string const& str) {
   std::string result;
   // reserve enough room so we do not need to re-alloc
-  result.reserve(str.size() + 16); 
+  result.reserve(str.size() + 16);
 
   char const* src = str.c_str();
   char const* end = src + str.size();
@@ -1191,7 +842,7 @@ std::string urlDecodePath(std::string const& str) {
 std::string urlDecode(std::string const& str) {
   std::string result;
   // reserve enough room so we do not need to re-alloc
-  result.reserve(str.size() + 16); 
+  result.reserve(str.size() + 16);
 
   char const* src = str.c_str();
   char const* end = src + str.size();
@@ -1301,17 +952,154 @@ std::string urlEncode(char const* src, size_t const len) {
   return result;
 }
 
+std::string encodeURIComponent(std::string const& str) {
+  return encodeURIComponent(str.c_str(), str.size());
+}
+
+std::string encodeURIComponent(char const* src, size_t const len) {
+  char const* end = src + len;
+
+  if (len >= (SIZE_MAX - 1) / 3) {
+    THROW_ARANGO_EXCEPTION(TRI_ERROR_OUT_OF_MEMORY);
+  }
+
+  std::string result;
+  result.reserve(3 * len);
+
+  for (; src < end; ++src) {
+    if (*src == '-' || *src == '_' || *src == '.' || *src == '!' ||
+        *src == '~' || *src == '*' || *src == '(' || *src == ')' ||
+        *src == '\'' || (*src >= 'a' && *src <= 'z') ||
+        (*src >= 'A' && *src <= 'Z') || (*src >= '0' && *src <= '9')) {
+      // no need to encode this character
+      result.push_back(*src);
+    } else {
+      // hex-encode the following character
+      result.push_back('%');
+      auto c = static_cast<unsigned char>(*src);
+      result.push_back(::hexValuesUpper[c >> 4]);
+      result.push_back(::hexValuesUpper[c % 16]);
+    }
+  }
+
+  return result;
+}
+
+std::string soundex(std::string const& str) {
+  return soundex(str.c_str(), str.size());
+}
+
+std::string soundex(char const* src, size_t const len) {
+  char const* end = src + len;
+
+  while (src < end) {
+    // skip over characters (e.g. whitespace and other non-ASCII letters)
+    // until we find something sensible
+    if ((*src >= 'a' && *src <= 'z') || (*src >= 'A' && *src <= 'Z')) {
+      break;
+    }
+    ++src;
+  }
+
+  std::string result;
+
+  if (src != end) {
+    // emit an upper-case character
+    result.push_back(::toupper(*src));
+    src++;
+    char previousCode = '\0';
+
+    while (src < end) {
+      char currentCode = ::soundexCode(*src);
+      if (currentCode != '\0' && currentCode != previousCode) {
+        result.push_back(currentCode);
+        if (result.length() >= 4) {
+          break;
+        }
+      }
+      previousCode = currentCode;
+      src++;
+    }
+
+    // pad result string with '0' chars up to a length of 4
+    while (result.length() < 4) {
+      result.push_back('0');
+    }
+  }
+
+  return result;
+}
+
+unsigned int levenshteinDistance(std::string const& str1, std::string const& str2) {
+  // convert input strings to vectors of (multi-byte) character numbers
+  std::vector<uint32_t> vect1 = characterCodes(str1);
+  std::vector<uint32_t> vect2 = characterCodes(str2);
+
+  // calculate levenshtein distance on vectors of character numbers
+  return static_cast<unsigned int>(::levenshteinDistance(vect1, vect2));
+}
+
+std::vector<uint32_t> characterCodes(std::string const& str) {
+  char const* s = str.data();
+  char const* e = s + str.size();
+
+  std::vector<uint32_t> charNums;
+  // be conservative, and reserve space for one number of input
+  // string byte. this may be too much, but it avoids later
+  // reallocation of the vector
+  charNums.reserve(str.size());
+
+  while (s < e) {
+    // note: consume advances the *s* pointer by one byte
+    unsigned char c = ::consume(s);
+    uint32_t n = uint32_t(c);
+
+    if ((c & 0x80U) == 0U) {
+      // single-byte character
+      charNums.push_back(n);
+    } else if ((c & 0xE0U) == 0xC0U) {
+      // two-byte character
+      if (s >= e) {
+        THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_INTERNAL,
+                                       "invalid UTF-8 sequence");
+      }
+      charNums.push_back((n << 8U) + uint32_t(::consume(s)));
+    } else if ((c & 0xF0U) == 0xE0U) {
+      // three-byte character
+      if (s + 1 >= e) {
+        THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_INTERNAL,
+                                       "invalid UTF-8 sequence");
+      }
+      charNums.push_back((n << 16U) + (uint32_t(::consume(s)) << 8U) +
+                         (uint32_t(::consume(s))));
+    } else if ((c & 0xF8U) == 0XF0U) {
+      // four-byte character
+      if (s + 2 >= e) {
+        THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_INTERNAL,
+                                       "invalid UTF-8 sequence");
+      }
+      charNums.push_back((n << 24U) + (uint32_t(::consume(s)) << 16U) +
+                         (uint32_t(::consume(s)) << 8U) + (uint32_t(::consume(s))));
+    } else {
+      THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_INTERNAL,
+                                     "invalid UTF-8 sequence");
+    }
+  }
+
+  return charNums;
+}
+
 // .............................................................................
 // CONVERT TO STRING
 // .............................................................................
 
 std::string itoa(int16_t attr) {
-  char buffer[7];
-  char* p = buffer;
-
   if (attr == INT16_MIN) {
     return "-32768";
   }
+
+  char buffer[7];
+  char* p = buffer;
 
   if (attr < 0) {
     *p++ = '-';
@@ -1361,12 +1149,12 @@ std::string itoa(uint16_t attr) {
 }
 
 std::string itoa(int32_t attr) {
-  char buffer[12];
-  char* p = buffer;
-
   if (attr == INT32_MIN) {
     return "-2147483648";
   }
+
+  char buffer[12];
+  char* p = buffer;
 
   if (attr < 0) {
     *p++ = '-';
@@ -1446,12 +1234,12 @@ std::string itoa(uint32_t attr) {
 }
 
 std::string itoa(int64_t attr) {
-  char buffer[21];
-  char* p = buffer;
-
   if (attr == INT64_MIN) {
     return "-9223372036854775808";
   }
+
+  char buffer[21];
+  char* p = buffer;
 
   if (attr < 0) {
     *p++ = '-';
@@ -1587,10 +1375,76 @@ std::string itoa(uint64_t attr) {
   return buffer;
 }
 
+size_t itoa(uint64_t attr, char* buffer) {
+  char* p = buffer;
+
+  if (10000000000000000000ULL <= attr) {
+    *p++ = char((attr / 10000000000000000000ULL) % 10 + '0');
+  }
+  if (1000000000000000000ULL <= attr) {
+    *p++ = char((attr / 1000000000000000000ULL) % 10 + '0');
+  }
+  if (100000000000000000ULL <= attr) {
+    *p++ = char((attr / 100000000000000000ULL) % 10 + '0');
+  }
+  if (10000000000000000ULL <= attr) {
+    *p++ = char((attr / 10000000000000000ULL) % 10 + '0');
+  }
+  if (1000000000000000ULL <= attr) {
+    *p++ = char((attr / 1000000000000000ULL) % 10 + '0');
+  }
+  if (100000000000000ULL <= attr) {
+    *p++ = char((attr / 100000000000000ULL) % 10 + '0');
+  }
+  if (10000000000000ULL <= attr) {
+    *p++ = char((attr / 10000000000000ULL) % 10 + '0');
+  }
+  if (1000000000000ULL <= attr) {
+    *p++ = char((attr / 1000000000000ULL) % 10 + '0');
+  }
+  if (100000000000ULL <= attr) {
+    *p++ = char((attr / 100000000000ULL) % 10 + '0');
+  }
+  if (10000000000ULL <= attr) {
+    *p++ = char((attr / 10000000000ULL) % 10 + '0');
+  }
+  if (1000000000ULL <= attr) {
+    *p++ = char((attr / 1000000000ULL) % 10 + '0');
+  }
+  if (100000000ULL <= attr) {
+    *p++ = char((attr / 100000000ULL) % 10 + '0');
+  }
+  if (10000000ULL <= attr) {
+    *p++ = char((attr / 10000000ULL) % 10 + '0');
+  }
+  if (1000000ULL <= attr) {
+    *p++ = char((attr / 1000000ULL) % 10 + '0');
+  }
+  if (100000ULL <= attr) {
+    *p++ = char((attr / 100000ULL) % 10 + '0');
+  }
+  if (10000ULL <= attr) {
+    *p++ = char((attr / 10000ULL) % 10 + '0');
+  }
+  if (1000ULL <= attr) {
+    *p++ = char((attr / 1000ULL) % 10 + '0');
+  }
+  if (100ULL <= attr) {
+    *p++ = char((attr / 100ULL) % 10 + '0');
+  }
+  if (10ULL <= attr) {
+    *p++ = char((attr / 10ULL) % 10 + '0');
+  }
+
+  *p++ = char(attr % 10 + '0');
+
+  return p - buffer;
+}
+
 std::string ftoa(double i) {
-  char buffer[64];
+  char buffer[24];
   int length = fpconv_dtoa(i, &buffer[0]);
-  
+
   return std::string(&buffer[0], static_cast<size_t>(length));
 }
 
@@ -1599,80 +1453,106 @@ std::string ftoa(double i) {
 // .............................................................................
 
 bool boolean(std::string const& str) {
-  std::string lower = tolower(trim(str));
-
-  if (lower == "true" || lower == "yes" || lower == "on" || lower == "y" ||
-      lower == "1") {
-    return true;
-  } else {
+  if (str.empty()) {
     return false;
   }
+  std::string lower = trim(str);
+  tolowerInPlace(&lower);
+
+  if (lower == "true" || lower == "yes" || lower == "on" || lower == "y" ||
+      lower == "1" || lower == "✓") {
+    return true;
+  }
+  return false;
 }
 
-int64_t int64(std::string const& str) {
+#ifndef TRI_STRING_UTILS_USE_FROM_CHARS
+int64_t int64(std::string const& value) {
   try {
-    return std::stoll(str, 0, 10);
+    return std::stoll(value, nullptr, 10);
   } catch (...) {
     return 0;
   }
 }
 
-uint64_t uint64(std::string const& str) {
+uint64_t uint64(std::string const& value) {
   try {
-    return std::stoull(str, 0, 10);
+    return std::stoull(value, nullptr, 10);
   } catch (...) {
     return 0;
   }
 }
+#endif
 
 uint64_t uint64_trusted(char const* value, size_t length) {
   uint64_t result = 0;
-    
-  switch (length) { 
-    case 20:    result += (value[length - 20] - '0') * 10000000000000000000ULL;
+
+  switch (length) {
+    case 20:
+      result += (value[length - 20] - '0') * 10000000000000000000ULL;
     // intentionally falls through
-    case 19:    result += (value[length - 19] - '0') * 1000000000000000000ULL;
+    case 19:
+      result += (value[length - 19] - '0') * 1000000000000000000ULL;
     // intentionally falls through
-    case 18:    result += (value[length - 18] - '0') * 100000000000000000ULL;
+    case 18:
+      result += (value[length - 18] - '0') * 100000000000000000ULL;
     // intentionally falls through
-    case 17:    result += (value[length - 17] - '0') * 10000000000000000ULL;
+    case 17:
+      result += (value[length - 17] - '0') * 10000000000000000ULL;
     // intentionally falls through
-    case 16:    result += (value[length - 16] - '0') * 1000000000000000ULL;
+    case 16:
+      result += (value[length - 16] - '0') * 1000000000000000ULL;
     // intentionally falls through
-    case 15:    result += (value[length - 15] - '0') * 100000000000000ULL;
+    case 15:
+      result += (value[length - 15] - '0') * 100000000000000ULL;
     // intentionally falls through
-    case 14:    result += (value[length - 14] - '0') * 10000000000000ULL;
+    case 14:
+      result += (value[length - 14] - '0') * 10000000000000ULL;
     // intentionally falls through
-    case 13:    result += (value[length - 13] - '0') * 1000000000000ULL;
+    case 13:
+      result += (value[length - 13] - '0') * 1000000000000ULL;
     // intentionally falls through
-    case 12:    result += (value[length - 12] - '0') * 100000000000ULL;
+    case 12:
+      result += (value[length - 12] - '0') * 100000000000ULL;
     // intentionally falls through
-    case 11:    result += (value[length - 11] - '0') * 10000000000ULL;
+    case 11:
+      result += (value[length - 11] - '0') * 10000000000ULL;
     // intentionally falls through
-    case 10:    result += (value[length - 10] - '0') * 1000000000ULL;
+    case 10:
+      result += (value[length - 10] - '0') * 1000000000ULL;
     // intentionally falls through
-    case  9:    result += (value[length -  9] - '0') * 100000000ULL;
+    case 9:
+      result += (value[length - 9] - '0') * 100000000ULL;
     // intentionally falls through
-    case  8:    result += (value[length -  8] - '0') * 10000000ULL;
+    case 8:
+      result += (value[length - 8] - '0') * 10000000ULL;
     // intentionally falls through
-    case  7:    result += (value[length -  7] - '0') * 1000000ULL;
+    case 7:
+      result += (value[length - 7] - '0') * 1000000ULL;
     // intentionally falls through
-    case  6:    result += (value[length -  6] - '0') * 100000ULL;
+    case 6:
+      result += (value[length - 6] - '0') * 100000ULL;
     // intentionally falls through
-    case  5:    result += (value[length -  5] - '0') * 10000ULL;
+    case 5:
+      result += (value[length - 5] - '0') * 10000ULL;
     // intentionally falls through
-    case  4:    result += (value[length -  4] - '0') * 1000ULL;
+    case 4:
+      result += (value[length - 4] - '0') * 1000ULL;
     // intentionally falls through
-    case  3:    result += (value[length -  3] - '0') * 100ULL;
+    case 3:
+      result += (value[length - 3] - '0') * 100ULL;
     // intentionally falls through
-    case  2:    result += (value[length -  2] - '0') * 10ULL;
+    case 2:
+      result += (value[length - 2] - '0') * 10ULL;
     // intentionally falls through
-    case  1:    result += (value[length -  1] - '0');
+    case 1:
+      result += (value[length - 1] - '0');
   }
 
   return result;
 }
 
+#ifndef TRI_STRING_UTILS_USE_FROM_CHARS
 int32_t int32(std::string const& str) {
 #ifdef TRI_HAVE_STRTOL_R
   struct reent buffer;
@@ -1682,7 +1562,7 @@ int32_t int32(std::string const& str) {
   struct reent buffer;
   return _strtol_r(&buffer, str.c_str(), 0, 10);
 #else
-  return (int32_t)strtol(str.c_str(), 0, 10);
+  return (int32_t)strtol(str.c_str(), nullptr, 10);
 #endif
 #endif
 }
@@ -1708,7 +1588,7 @@ int32_t int32(char const* value, size_t size) {
   struct reent buffer;
   return _strtol_r(&buffer, value, 0, 10);
 #else
-  return (int32_t)strtol(value, 0, 10);
+  return (int32_t)strtol(value, nullptr, 10);
 #endif
 #endif
 }
@@ -1722,21 +1602,7 @@ uint32_t uint32(std::string const& str) {
   struct reent buffer;
   return _strtoul_r(&buffer, str.c_str(), 0, 10);
 #else
-  return (uint32_t)strtoul(str.c_str(), 0, 10);
-#endif
-#endif
-}
-
-uint32_t unhexUint32(std::string const& str) {
-#ifdef TRI_HAVE_STRTOUL_R
-  struct reent buffer;
-  return strtoul_r(&buffer, str.c_str(), 0, 16);
-#else
-#ifdef TRI_HAVE__STRTOUL_R
-  struct reent buffer;
-  return _strtoul_r(&buffer, str.c_str(), 0, 16);
-#else
-  return (uint32_t)strtoul(str.c_str(), 0, 16);
+  return (uint32_t)strtoul(str.c_str(), nullptr, 10);
 #endif
 #endif
 }
@@ -1762,36 +1628,11 @@ uint32_t uint32(char const* value, size_t size) {
   struct reent buffer;
   return _strtoul_r(&buffer, value, 0, 10);
 #else
-  return (uint32_t)strtoul(value, 0, 10);
+  return (uint32_t)strtoul(value, nullptr, 10);
 #endif
 #endif
 }
-
-uint32_t unhexUint32(char const* value, size_t size) {
-  char tmp[22];
-
-  if (value[size] != '\0') {
-    if (size >= sizeof(tmp)) {
-      size = sizeof(tmp) - 1;
-    }
-
-    memcpy(tmp, value, size);
-    tmp[size] = '\0';
-    value = tmp;
-  }
-
-#ifdef TRI_HAVE_STRTOUL_R
-  struct reent buffer;
-  return strtoul_r(&buffer, value, 0, 16);
-#else
-#ifdef TRI_HAVE__STRTOUL_R
-  struct reent buffer;
-  return _strtoul_r(&buffer, value, 0, 16);
-#else
-  return (uint32_t)strtoul(value, 0, 16);
 #endif
-#endif
-}
 
 double doubleDecimal(std::string const& str) {
   return doubleDecimal(str.c_str(), str.size());
@@ -1880,76 +1721,6 @@ float floatDecimal(char const* value, size_t size) {
 }
 
 // .............................................................................
-// UTF8
-// .............................................................................
-
-// this function takes a sequence of hexadecimal characters (inputStr) of a
-// particular
-// length (len) and output 1,2,3 or 4 characters which represents the utf8
-// encoding
-// of the unicode representation of that character.
-
-bool unicodeToUTF8(char const* inputStr, size_t const& len,
-                   std::string& outputStr) {
-  uint32_t outputInt = 0;
-  bool ok;
-
-  ok = parseHexanumber(inputStr, len, &outputInt);
-  if (ok == false) {
-    outputStr = std::string(inputStr, len);
-    return false;
-  }
-  ok = isHighSurrugate(outputInt) || isLowSurrugate(outputInt);
-  if (ok == true) {
-    outputStr.append("?");
-    return false;
-  }
-  ok = toUtf8(outputInt, outputStr);
-  if (ok == false) {
-    outputStr = std::string(inputStr, len);
-  }
-  return ok;
-}
-
-// .............................................................................
-// UTF16
-// .............................................................................
-
-// this function converts unicode symbols whose code points lies in U+10000 to
-// U+10FFFF
-//
-// the parameters of the function correspond to the UTF16 description for
-// the code points mentioned above
-//
-// high_surrogate is the high surrogate bytes sequence, valid values begin with
-// D[89AB]
-// low_surrogate  is the low  surrogate bytes sequence, valid values begin with
-// D[CDEF]
-// for details see:
-// http://en.wikipedia.org/wiki/UTF-16#Code_points_U.2B10000_to_U.2B10FFFF
-//
-
-bool convertUTF16ToUTF8(char const* high_surrogate, char const* low_surrogate,
-                        std::string& outputStr) {
-  uint32_t w1 = 0;
-  uint32_t w2 = 0;
-  uint32_t v;
-  bool ok = true;
-
-  ok = ok && parseHexanumber(high_surrogate, 4, &w1);
-  ok = ok && parseHexanumber(low_surrogate, 4, &w2);
-  if (ok == false) {
-    return false;
-  }
-  ok = isHighSurrugate(w1) && isLowSurrugate(w2);
-  ok = ok && toUnicode(w1, w2, &v);
-  if (ok == true) {
-    toUtf8(v, outputStr);
-  }
-  return ok;
-}
-
-// .............................................................................
 // BASE64
 // .............................................................................
 
@@ -1971,10 +1742,8 @@ std::string encodeBase64(std::string const& in) {
 
     if (i == 3) {
       charArray4[0] = (charArray3[0] & 0xfc) >> 2;
-      charArray4[1] =
-          ((charArray3[0] & 0x03) << 4) + ((charArray3[1] & 0xf0) >> 4);
-      charArray4[2] =
-          ((charArray3[1] & 0x0f) << 2) + ((charArray3[2] & 0xc0) >> 6);
+      charArray4[1] = ((charArray3[0] & 0x03) << 4) + ((charArray3[1] & 0xf0) >> 4);
+      charArray4[2] = ((charArray3[1] & 0x0f) << 2) + ((charArray3[2] & 0xc0) >> 6);
       charArray4[3] = charArray3[2] & 0x3f;
 
       for (i = 0; i < 4; i++) {
@@ -1991,10 +1760,8 @@ std::string encodeBase64(std::string const& in) {
     }
 
     charArray4[0] = (charArray3[0] & 0xfc) >> 2;
-    charArray4[1] =
-        ((charArray3[0] & 0x03) << 4) + ((charArray3[1] & 0xf0) >> 4);
-    charArray4[2] =
-        ((charArray3[1] & 0x0f) << 2) + ((charArray3[2] & 0xc0) >> 6);
+    charArray4[1] = ((charArray3[0] & 0x03) << 4) + ((charArray3[1] & 0xf0) >> 4);
+    charArray4[2] = ((charArray3[1] & 0x0f) << 2) + ((charArray3[2] & 0xc0) >> 6);
     charArray4[3] = charArray3[2] & 0x3f;
 
     for (int j = 0; (j < i + 1); j++) {
@@ -2012,7 +1779,7 @@ std::string encodeBase64(std::string const& in) {
 std::string decodeBase64(std::string const& source) {
   unsigned char charArray4[4];
   unsigned char charArray3[3];
-  
+
   std::string ret;
 
   int i = 0;
@@ -2032,8 +1799,7 @@ std::string decodeBase64(std::string const& source) {
       }
 
       charArray3[0] = (charArray4[0] << 2) + ((charArray4[1] & 0x30) >> 4);
-      charArray3[1] =
-          ((charArray4[1] & 0xf) << 4) + ((charArray4[2] & 0x3c) >> 2);
+      charArray3[1] = ((charArray4[1] & 0xf) << 4) + ((charArray4[2] & 0x3c) >> 2);
       charArray3[2] = ((charArray4[2] & 0x3) << 6) + charArray4[3];
 
       for (i = 0; (i < 3); i++) {
@@ -2054,8 +1820,7 @@ std::string decodeBase64(std::string const& source) {
     }
 
     charArray3[0] = (charArray4[0] << 2) + ((charArray4[1] & 0x30) >> 4);
-    charArray3[1] =
-        ((charArray4[1] & 0xf) << 4) + ((charArray4[2] & 0x3c) >> 2);
+    charArray3[1] = ((charArray4[1] & 0xf) << 4) + ((charArray4[2] & 0x3c) >> 2);
     charArray3[2] = ((charArray4[2] & 0x3) << 6) + charArray4[3];
 
     for (int j = 0; j < i - 1; j++) {
@@ -2084,10 +1849,8 @@ std::string encodeBase64U(std::string const& in) {
 
     if (i == 3) {
       charArray4[0] = (charArray3[0] & 0xfc) >> 2;
-      charArray4[1] =
-          ((charArray3[0] & 0x03) << 4) + ((charArray3[1] & 0xf0) >> 4);
-      charArray4[2] =
-          ((charArray3[1] & 0x0f) << 2) + ((charArray3[2] & 0xc0) >> 6);
+      charArray4[1] = ((charArray3[0] & 0x03) << 4) + ((charArray3[1] & 0xf0) >> 4);
+      charArray4[2] = ((charArray3[1] & 0x0f) << 2) + ((charArray3[2] & 0xc0) >> 6);
       charArray4[3] = charArray3[2] & 0x3f;
 
       for (i = 0; i < 4; i++) {
@@ -2104,10 +1867,8 @@ std::string encodeBase64U(std::string const& in) {
     }
 
     charArray4[0] = (charArray3[0] & 0xfc) >> 2;
-    charArray4[1] =
-        ((charArray3[0] & 0x03) << 4) + ((charArray3[1] & 0xf0) >> 4);
-    charArray4[2] =
-        ((charArray3[1] & 0x0f) << 2) + ((charArray3[2] & 0xc0) >> 6);
+    charArray4[1] = ((charArray3[0] & 0x03) << 4) + ((charArray3[1] & 0xf0) >> 4);
+    charArray4[2] = ((charArray3[1] & 0x0f) << 2) + ((charArray3[2] & 0xc0) >> 6);
     charArray4[3] = charArray3[2] & 0x3f;
 
     for (int j = 0; (j < i + 1); j++) {
@@ -2145,8 +1906,7 @@ std::string decodeBase64U(std::string const& source) {
       }
 
       charArray3[0] = (charArray4[0] << 2) + ((charArray4[1] & 0x30) >> 4);
-      charArray3[1] =
-          ((charArray4[1] & 0xf) << 4) + ((charArray4[2] & 0x3c) >> 2);
+      charArray3[1] = ((charArray4[1] & 0xf) << 4) + ((charArray4[2] & 0x3c) >> 2);
       charArray3[2] = ((charArray4[2] & 0x3) << 6) + charArray4[3];
 
       for (i = 0; (i < 3); i++) {
@@ -2167,8 +1927,7 @@ std::string decodeBase64U(std::string const& source) {
     }
 
     charArray3[0] = (charArray4[0] << 2) + ((charArray4[1] & 0x30) >> 4);
-    charArray3[1] =
-        ((charArray4[1] & 0xf) << 4) + ((charArray4[2] & 0x3c) >> 2);
+    charArray3[1] = ((charArray4[1] & 0xf) << 4) + ((charArray4[2] & 0x3c) >> 2);
     charArray3[2] = ((charArray4[2] & 0x3) << 6) + charArray4[3];
 
     for (int j = 0; j < i - 1; j++) {
@@ -2195,8 +1954,7 @@ std::string correctPath(std::string const& incorrectPath) {
 // list delimited
 // by ','. E.g entry(2,str,',') = 'yy'
 
-std::string entry(size_t const pos, std::string const& sourceStr,
-                  std::string const& delimiter) {
+std::string entry(size_t const pos, std::string const& sourceStr, std::string const& delimiter) {
   size_t delLength = delimiter.length();
   size_t sourceLength = sourceStr.length();
 
@@ -2214,8 +1972,7 @@ std::string entry(size_t const pos, std::string const& sourceStr,
   while (true) {
     size_t delPos = sourceStr.find(delimiter, offSet);
 
-    if ((delPos == sourceStr.npos) || (delPos >= sourceLength) ||
-        (offSet >= sourceLength)) {
+    if ((delPos == sourceStr.npos) || (delPos >= sourceLength) || (offSet >= sourceLength)) {
       return sourceStr.substr(offSet);
     }
 
@@ -2265,26 +2022,73 @@ size_t numEntries(std::string const& sourceStr, std::string const& delimiter) {
   return k;
 }
 
-std::string encodeHex(std::string const& str) {
-  size_t len;
-  char* tmp = TRI_EncodeHexString(str.c_str(), str.length(), &len);
-  
-  if (tmp != nullptr) {
-    TRI_DEFER(TRI_FreeString(tmp));
-    return std::string(tmp, len);
+std::string encodeHex(char const* value, size_t length) {
+  std::string result;
+  result.reserve(length * 2);
+
+  char const* p = value;
+  char const* e = p + length;
+  while (p < e) {
+    auto c = static_cast<unsigned char>(*p++);
+    result.push_back(::hexValuesLower[c >> 4]);
+    result.push_back(::hexValuesLower[c % 16]);
   }
-  return std::string();
+
+  return result;
 }
 
-std::string decodeHex(std::string const& str) {
-  size_t len;
-  char* tmp = TRI_DecodeHexString(str.c_str(), str.length(), &len);
-  
-  if (tmp != nullptr) {
-    TRI_DEFER(TRI_FreeString(tmp));
-    return std::string(tmp, len);
+std::string encodeHex(std::string const& value) {
+  return encodeHex(value.data(), value.size());
+}
+
+std::string decodeHex(char const* value, size_t length) {
+  std::string result;
+  // input string length should be divisable by 2
+  // but we do not assert for this here, because it might
+  // be an end user error
+  if ((length & 1) != 0 || length == 0) {
+    // invalid or empty
+    return std::string();
   }
-  return std::string();
+
+  result.reserve(length / 2);
+
+  unsigned char const* p = reinterpret_cast<unsigned char const*>(value);
+  unsigned char const* e = p + length;
+  while (p + 2 <= e) {
+    unsigned char c = *p++;
+    unsigned char v = 0;
+    if (c >= '0' && c <= '9') {
+      v = (c - '0') << 4;
+    } else if (c >= 'a' && c <= 'f') {
+      v = (c - 'a' + 10) << 4;
+    } else if (c >= 'A' && c <= 'F') {
+      v = (c - 'A' + 10) << 4;
+    } else {
+      // invalid input character
+      return std::string();
+    }
+
+    c = *p++;
+    if (c >= '0' && c <= '9') {
+      v += (c - '0');
+    } else if (c >= 'a' && c <= 'f') {
+      v += (c - 'a' + 10);
+    } else if (c >= 'A' && c <= 'F') {
+      v += (c - 'A' + 10);
+    } else {
+      // invalid input character
+      return std::string();
+    }
+
+    result.push_back(v);
+  }
+
+  return result;
+}
+
+std::string decodeHex(std::string const& value) {
+  return decodeHex(value.data(), value.size());
 }
 
 bool gzipUncompress(char const* compressed, size_t compressedLength, std::string& uncompressed) {
@@ -2293,17 +2097,17 @@ bool gzipUncompress(char const* compressed, size_t compressedLength, std::string
   if (compressedLength == 0) {
     /* empty input */
     return true;
-  }  
+  }
 
-  z_stream strm;  
+  z_stream strm;
   memset(&strm, 0, sizeof(strm));
   strm.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(compressed));
-  strm.avail_in = (uInt) compressedLength; 
+  strm.avail_in = (uInt)compressedLength;
 
-  if (inflateInit2(&strm, (16 + MAX_WBITS)) != Z_OK) {  
-    return false;  
-  }  
-  
+  if (inflateInit2(&strm, (16 + MAX_WBITS)) != Z_OK) {
+    return false;
+  }
+
   int ret;
   char outbuffer[32768];
 
@@ -2317,11 +2121,11 @@ bool gzipUncompress(char const* compressed, size_t compressedLength, std::string
       uncompressed.append(outbuffer, strm.total_out - uncompressed.size());
     }
   } while (ret == Z_OK);
-  
+
   inflateEnd(&strm);
 
   return (ret == Z_STREAM_END);
-}  
+}
 
 bool gzipUncompress(std::string const& compressed, std::string& uncompressed) {
   return gzipUncompress(compressed.c_str(), compressed.size(), uncompressed);
@@ -2333,8 +2137,8 @@ bool gzipDeflate(char const* compressed, size_t compressedLength, std::string& u
   z_stream strm;
   memset(&strm, 0, sizeof(strm));
   strm.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(compressed));
-  strm.avail_in = (uInt) compressedLength;
-  
+  strm.avail_in = (uInt)compressedLength;
+
   if (inflateInit(&strm) != Z_OK) {
     return false;
   }
@@ -2362,6 +2166,6 @@ bool gzipDeflate(std::string const& compressed, std::string& uncompressed) {
   return gzipDeflate(compressed.c_str(), compressed.size(), uncompressed);
 }
 
-}
-}
-}
+}  // namespace StringUtils
+}  // namespace basics
+}  // namespace arangodb

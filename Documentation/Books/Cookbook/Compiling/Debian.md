@@ -58,7 +58,7 @@ sudo aptitude -y install git-core \
     libjemalloc-dev \
     cmake \
     python2.7 \
-sudo aptitude -y install libldap2-dev # Enterprise version only
+sudo aptitude -y install libldap2-dev # Enterprise Edition only
 ```
 
 ### 
@@ -93,7 +93,7 @@ installed libraries. If you installed the compiler in a non standard location, y
 
     cmake -DCMAKE_C_COMPILER=/opt/bin/gcc -DCMAKE_CXX_COMPILER=/opt/bin/g++ ..
 
-If you compile on MacOS, you should add the following options to the cmake command:
+If you compile on macOS, you should add the following options to the cmake command:
 
     cmake .. -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl -DCMAKE_OSX_DEPLOYMENT_TARGET=10.11
 
@@ -220,11 +220,11 @@ The server will by default be installed in
 
 The configuration file will be installed in
 
-    /usr/local/etc/arangodb/arangod.conf
+    /usr/local/etc/arangodb3/arangod.conf
 
 The database will be installed in
 
-    /usr/local/var/lib/arangodb
+    /usr/local/var/lib/arangodb3
 
 The ArangoShell will be installed in
 

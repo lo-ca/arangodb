@@ -37,19 +37,19 @@ class ManagedDocumentResult;
 namespace velocypack {
 class Builder;
 class Slice;
-}
+}  // namespace velocypack
 
 namespace aql {
 struct AstNode;
 class Expression;
 class Query;
 class TraversalNode;
-}
+}  // namespace aql
 
 namespace graph {
 class EdgeUniquenessChecker;
 class TraverserCache;
-}
+}  // namespace graph
 
 namespace traverser {
 
@@ -62,7 +62,6 @@ struct TraverserOptions : public graph::BaseOptions {
   enum UniquenessLevel { NONE, PATH, GLOBAL };
 
  protected:
-
   std::unordered_map<uint64_t, std::vector<LookupInfo>> _depthLookupInfo;
 
   std::unordered_map<uint64_t, aql::Expression*> _vertexExpressions;
@@ -96,14 +95,14 @@ struct TraverserOptions : public graph::BaseOptions {
   virtual ~TraverserOptions();
 
   /// @brief Build a velocypack for cloning in the plan.
-  void toVelocyPack(arangodb::velocypack::Builder&) const;
+  void toVelocyPack(arangodb::velocypack::Builder&) const override;
 
   /// @brief Build a velocypack for indexes
-  void toVelocyPackIndexes(arangodb::velocypack::Builder&) const;
+  void toVelocyPackIndexes(arangodb::velocypack::Builder&) const override;
 
   /// @brief Build a velocypack containing all relevant information
   ///        for DBServer traverser engines.
-  void buildEngineInfo(arangodb::velocypack::Builder&) const;
+  void buildEngineInfo(arangodb::velocypack::Builder&) const override;
 
   /// @brief Add a lookup info for specific depth
   void addDepthLookupInfo(aql::ExecutionPlan* plan, std::string const& collectionName,
@@ -113,7 +112,7 @@ struct TraverserOptions : public graph::BaseOptions {
   bool vertexHasFilter(uint64_t) const;
 
   bool hasEdgeFilter(int64_t, size_t) const;
-  
+
   bool evaluateEdgeExpression(arangodb::velocypack::Slice, StringRef vertexId,
                               uint64_t, size_t) const;
 
@@ -123,12 +122,11 @@ struct TraverserOptions : public graph::BaseOptions {
 
   void linkTraverser(arangodb::traverser::ClusterTraverser*);
 
-  double estimateCost(size_t& nrItems) const;
+  double estimateCost(size_t& nrItems) const override;
 
  private:
-
   graph::EdgeCursor* nextCursorCoordinator(StringRef vid, uint64_t);
 };
-}
-}
+}  // namespace traverser
+}  // namespace arangodb
 #endif

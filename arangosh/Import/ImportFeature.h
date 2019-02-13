@@ -24,25 +24,26 @@
 #define ARANGODB_IMPORT_IMPORT_FEATURE_H 1
 
 #include "ApplicationFeatures/ApplicationFeature.h"
-#include "V8Client/ArangoClientHelper.h"
 #include "Shell/ClientFeature.h"
+#include "V8Client/ArangoClientHelper.h"
 
 namespace arangodb {
+
 namespace httpclient {
+
 class GeneralClientConnection;
 class SimpleHttpClient;
 class SimpleHttpResult;
-}
+
+}  // namespace httpclient
 
 class ImportFeature final : public application_features::ApplicationFeature,
                             public ArangoClientHelper {
  public:
-  ImportFeature(application_features::ApplicationServer* server, int* result);
+  ImportFeature(application_features::ApplicationServer& server, int* result);
 
- public:
   void collectOptions(std::shared_ptr<options::ProgramOptions>) override;
-  void validateOptions(
-      std::shared_ptr<options::ProgramOptions> options) override;
+  void validateOptions(std::shared_ptr<options::ProgramOptions> options) override;
   void start() override;
 
  private:
@@ -51,6 +52,7 @@ class ImportFeature final : public application_features::ApplicationFeature,
   std::string _filename;
   bool _useBackslash;
   bool _convert;
+  bool _autoChunkSize;
   uint64_t _chunkSize;
   uint32_t _threadCount;
   std::string _collectionName;
@@ -70,7 +72,9 @@ class ImportFeature final : public application_features::ApplicationFeature,
   std::string _onDuplicateAction;
   uint64_t _rowsToSkip;
   int* _result;
+  bool _latencyStats;
 };
-}
+
+}  // namespace arangodb
 
 #endif

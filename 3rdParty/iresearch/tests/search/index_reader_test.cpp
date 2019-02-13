@@ -31,15 +31,13 @@
 #include "utils/version_utils.hpp"
 #include "utils/utf8_path.hpp"
 
-namespace ir = iresearch;
-
 NS_LOCAL
 
-ir::format* codec0;
-ir::format* codec1;
+irs::format* codec0;
+irs::format* codec1;
 
-ir::format::ptr get_codec0() { return ir::format::ptr(codec0, [](ir::format*)->void{}); }
-ir::format::ptr get_codec1() { return ir::format::ptr(codec1, [](ir::format*)->void{}); }
+irs::format::ptr get_codec0() { return irs::format::ptr(codec0, [](irs::format*)->void{}); }
+irs::format::ptr get_codec1() { return irs::format::ptr(codec1, [](irs::format*)->void{}); }
 
 NS_END
 
@@ -48,24 +46,24 @@ NS_END
 // ----------------------------------------------------------------------------
 
 TEST(directory_reader_test, open_empty_directory) {
-  ir::memory_directory dir;
-  ir::version10::format codec;
-  iresearch::format::ptr codec_ptr(&codec, [](iresearch::format*)->void{});
+  irs::memory_directory dir;
+  auto codec = irs::formats::get("1_0");
+  ASSERT_NE(nullptr, codec);
 
   /* no index */
-  ASSERT_THROW(ir::directory_reader::open(dir, codec_ptr), ir::index_not_found);
+  ASSERT_THROW(irs::directory_reader::open(dir, codec), irs::index_not_found);
 }
 
 TEST(directory_reader_test, open_empty_index) {
-  ir::memory_directory dir;
-  ir::version10::format codec;
-  iresearch::format::ptr codec_ptr(&codec, [](iresearch::format*)->void{});
+  irs::memory_directory dir;
+  auto codec = irs::formats::get("1_0");
+  ASSERT_NE(nullptr, codec);
 
   /* create empty index */
-  ir::index_writer::make(dir, codec_ptr, ir::OM_CREATE)->commit();
+  irs::index_writer::make(dir, codec, irs::OM_CREATE)->commit();
 
   /* open reader */
-  auto rdr = ir::directory_reader::open(dir, codec_ptr);
+  auto rdr = irs::directory_reader::open(dir, codec);
   ASSERT_FALSE(!rdr);
   ASSERT_EQ(0, rdr.docs_count());
   ASSERT_EQ(0, rdr.live_docs_count());
@@ -74,48 +72,48 @@ TEST(directory_reader_test, open_empty_index) {
 }
 
 TEST(directory_reader_test, open_newest_index) {
-  struct test_index_meta_reader: public ir::index_meta_reader {
-    virtual bool last_segments_file(const ir::directory&, std::string& out) const override { 
+  struct test_index_meta_reader: public irs::index_meta_reader {
+    virtual bool last_segments_file(const irs::directory&, std::string& out) const override {
       out = segments_file;
       return true;
     }
-    virtual void read(const ir::directory& dir, ir::index_meta& meta, const ir::string_ref& filename = ir::string_ref::nil) override {
+    virtual void read(const irs::directory& dir, irs::index_meta& meta, const irs::string_ref& filename = irs::string_ref::NIL) override {
       read_file.assign(filename.c_str(), filename.size());
     };
     std::string segments_file;
     std::string read_file;
   };
-  class test_format: public ir::format {
+  class test_format: public irs::format {
    public:
     mutable test_index_meta_reader index_meta_reader;
-    test_format(const ir::format::type_id& type): ir::format(type) {}
-    virtual ir::index_meta_writer::ptr get_index_meta_writer() const override { return nullptr; }
-    virtual ir::index_meta_reader::ptr get_index_meta_reader() const override {
+    test_format(const irs::format::type_id& type): irs::format(type) {}
+    virtual irs::index_meta_writer::ptr get_index_meta_writer() const override { return nullptr; }
+    virtual irs::index_meta_reader::ptr get_index_meta_reader() const override {
       return irs::memory::make_managed<irs::index_meta_reader, false>(&index_meta_reader);
     }
-    virtual ir::segment_meta_writer::ptr get_segment_meta_writer() const override { return nullptr; }
-    virtual ir::segment_meta_reader::ptr get_segment_meta_reader() const override { return nullptr; }
-    virtual ir::document_mask_writer::ptr get_document_mask_writer() const override { return nullptr; }
-    virtual ir::document_mask_reader::ptr get_document_mask_reader() const override { return nullptr; }
-    virtual ir::field_writer::ptr get_field_writer(bool volatile_attributes) const override { return nullptr; }
-    virtual ir::field_reader::ptr get_field_reader() const override { return nullptr; }
-    virtual ir::column_meta_writer::ptr get_column_meta_writer() const override { return nullptr; }
-    virtual ir::column_meta_reader::ptr get_column_meta_reader() const override { return nullptr; }
-    virtual ir::columnstore_writer::ptr get_columnstore_writer() const override { return nullptr; }
-    virtual ir::columnstore_reader::ptr get_columnstore_reader() const override { return nullptr; }
+    virtual irs::segment_meta_writer::ptr get_segment_meta_writer() const override { return nullptr; }
+    virtual irs::segment_meta_reader::ptr get_segment_meta_reader() const override { return nullptr; }
+    virtual irs::document_mask_writer::ptr get_document_mask_writer() const override { return nullptr; }
+    virtual irs::document_mask_reader::ptr get_document_mask_reader() const override { return nullptr; }
+    virtual irs::field_writer::ptr get_field_writer(bool volatile_attributes) const override { return nullptr; }
+    virtual irs::field_reader::ptr get_field_reader() const override { return nullptr; }
+    virtual irs::column_meta_writer::ptr get_column_meta_writer() const override { return nullptr; }
+    virtual irs::column_meta_reader::ptr get_column_meta_reader() const override { return nullptr; }
+    virtual irs::columnstore_writer::ptr get_columnstore_writer() const override { return nullptr; }
+    virtual irs::columnstore_reader::ptr get_columnstore_reader() const override { return nullptr; }
   };
-  ir::format::type_id test_format0_type("test_format0");
-  ir::format::type_id test_format1_type("test_format1");
+  irs::format::type_id test_format0_type("test_format0");
+  irs::format::type_id test_format1_type("test_format1");
   test_format test_codec0(test_format0_type);
   test_format test_codec1(test_format1_type);
-  ir::format_registrar test_format0_registrar(test_format0_type, &get_codec0);
-  ir::format_registrar test_format1_registrar(test_format1_type, &get_codec1);
+  irs::format_registrar test_format0_registrar(test_format0_type, &get_codec0);
+  irs::format_registrar test_format1_registrar(test_format1_type, &get_codec1);
   test_index_meta_reader& test_reader0 = test_codec0.index_meta_reader;
   test_index_meta_reader& test_reader1 = test_codec1.index_meta_reader;
   codec0 = &test_codec0;
   codec1 = &test_codec1;
 
-  ir::memory_directory dir;
+  irs::memory_directory dir;
   std::string codec0_file0("0seg0");
   std::string codec0_file1("0seg1");
   std::string codec1_file0("1seg0");
@@ -123,7 +121,7 @@ TEST(directory_reader_test, open_newest_index) {
 
   ASSERT_FALSE(!dir.create(codec0_file0));
   ASSERT_FALSE(!dir.create(codec1_file0));
-  ir::sleep_ms(1000); // wait 1 sec to ensure index file timestamps differ
+  irs::sleep_ms(1000); // wait 1 sec to ensure index file timestamps differ
   ASSERT_FALSE(!dir.create(codec0_file1));
   ASSERT_FALSE(!dir.create(codec1_file1));
 
@@ -131,7 +129,7 @@ TEST(directory_reader_test, open_newest_index) {
   test_reader1.read_file.clear();
   test_reader0.segments_file = codec0_file0;
   test_reader1.segments_file = codec1_file1;
-  ir::directory_reader::open(dir);
+  irs::directory_reader::open(dir);
   ASSERT_TRUE(test_reader0.read_file.empty()); // file not read from codec0
   ASSERT_EQ(codec1_file1, test_reader1.read_file);  // check file read from codec1
 
@@ -139,7 +137,7 @@ TEST(directory_reader_test, open_newest_index) {
   test_reader1.read_file.clear();
   test_reader0.segments_file = codec0_file1;
   test_reader1.segments_file = codec1_file0;
-  ir::directory_reader::open(dir);
+  irs::directory_reader::open(dir);
   ASSERT_EQ(codec0_file1, test_reader0.read_file); // check file read from codec0
   ASSERT_TRUE(test_reader1.read_file.empty()); // file not read from codec1
 
@@ -153,7 +151,7 @@ TEST(directory_reader_test, open) {
     [] (tests::document& doc, const std::string& name, const tests::json_doc_generator::json_value& data) {
     if (tests::json_doc_generator::ValueType::STRING == data.vt) {
       doc.insert(std::make_shared<tests::templates::string_field>(
-        ir::string_ref(name),
+        irs::string_ref(name),
         data.str
       ));
     }
@@ -169,14 +167,14 @@ TEST(directory_reader_test, open) {
   tests::document const* doc8 = gen.next();
   tests::document const* doc9 = gen.next(); 
 
-  ir::memory_directory dir;
-  ir::version10::format codec;
-  iresearch::format::ptr codec_ptr(&codec, [](iresearch::format*)->void{});
+  irs::memory_directory dir;
+  auto codec_ptr = irs::formats::get("1_0");
+  ASSERT_NE(nullptr, codec_ptr);
 
   // create index
   {
     // open writer
-    auto writer = ir::index_writer::make(dir, codec_ptr, ir::OM_CREATE);
+    auto writer = irs::index_writer::make(dir, codec_ptr, irs::OM_CREATE);
 
     // add first segment
     ASSERT_TRUE(insert(*writer,
@@ -225,7 +223,7 @@ TEST(directory_reader_test, open) {
   }
 
   // open reader
-  auto rdr = ir::directory_reader::open(dir, codec_ptr);
+  auto rdr = irs::directory_reader::open(dir, codec_ptr);
   ASSERT_FALSE(!rdr);
   ASSERT_EQ(9, rdr.docs_count());
   ASSERT_EQ(9, rdr.live_docs_count());  
@@ -316,20 +314,23 @@ TEST(directory_reader_test, open) {
 // ----------------------------------------------------------------------------
 
 TEST(segment_reader_test, segment_reader_has) {
-  irs::version10::format codec;
+  auto codec = irs::formats::get("1_0");
+  ASSERT_NE(nullptr, codec);
+
+  std::string filename;
 
   // has none (default)
   {
     irs::memory_directory dir;
-    auto writer = codec.get_segment_meta_writer();
-    auto reader = codec.get_segment_meta_reader();
+    auto writer = codec->get_segment_meta_writer();
+    auto reader = codec->get_segment_meta_reader();
     irs::segment_meta expected;
 
-    writer->write(dir, expected);
+    writer->write(dir, filename, expected);
 
     irs::segment_meta meta;
 
-    reader->read(dir, meta, writer->filename(expected));
+    reader->read(dir, meta, filename);
 
     ASSERT_EQ(expected, meta);
     ASSERT_FALSE(irs::segment_reader::has<irs::columnstore_reader>(meta));
@@ -339,16 +340,16 @@ TEST(segment_reader_test, segment_reader_has) {
   // has column store
   {
     irs::memory_directory dir;
-    auto writer = codec.get_segment_meta_writer();
-    auto reader = codec.get_segment_meta_reader();
+    auto writer = codec->get_segment_meta_writer();
+    auto reader = codec->get_segment_meta_reader();
     irs::segment_meta expected;
 
     expected.column_store = true;
-    writer->write(dir, expected);
+    writer->write(dir, filename, expected);
 
     irs::segment_meta meta;
 
-    reader->read(dir, meta, writer->filename(expected));
+    reader->read(dir, meta, filename);
 
     ASSERT_EQ(expected, meta);
     ASSERT_TRUE(irs::segment_reader::has<irs::columnstore_reader>(meta));
@@ -358,20 +359,20 @@ TEST(segment_reader_test, segment_reader_has) {
   // has document mask
   {
     irs::memory_directory dir;
-    auto writer = codec.get_segment_meta_writer();
-    auto reader = codec.get_segment_meta_reader();
-    auto docs_mask_writer = codec.get_document_mask_writer();
+    auto writer = codec->get_segment_meta_writer();
+    auto reader = codec->get_segment_meta_reader();
+    auto docs_mask_writer = codec->get_document_mask_writer();
     irs::segment_meta expected;
 
-    expected.version = 1; // version > 0 implies document_mask
-    docs_mask_writer->prepare(dir, expected);
-    docs_mask_writer->begin(0);
-    docs_mask_writer->end();
-    writer->write(dir, expected);
+    expected.docs_count = 43;
+    expected.live_docs_count = 42;
+    expected.version = 0;
+    docs_mask_writer->write(dir, expected, {0});
+    writer->write(dir, filename, expected);
 
     irs::segment_meta meta;
 
-    reader->read(dir, meta, writer->filename(expected));
+    reader->read(dir, meta, filename);
 
     ASSERT_EQ(expected, meta);
     ASSERT_FALSE(irs::segment_reader::has<irs::columnstore_reader>(meta));
@@ -381,21 +382,21 @@ TEST(segment_reader_test, segment_reader_has) {
   // has all
   {
     irs::memory_directory dir;
-    auto writer = codec.get_segment_meta_writer();
-    auto reader = codec.get_segment_meta_reader();
-    auto docs_mask_writer = codec.get_document_mask_writer();
+    auto writer = codec->get_segment_meta_writer();
+    auto reader = codec->get_segment_meta_reader();
+    auto docs_mask_writer = codec->get_document_mask_writer();
     irs::segment_meta expected;
 
+    expected.docs_count = 43;
+    expected.live_docs_count = 42;
     expected.column_store = true;
-    expected.version = 1; // version > 0 implies document_mask
-    docs_mask_writer->prepare(dir, expected);
-    docs_mask_writer->begin(0);
-    docs_mask_writer->end();
-    writer->write(dir, expected);
+    expected.version = 1;
+    docs_mask_writer->write(dir, expected, {0});
+    writer->write(dir, filename, expected);
 
     irs::segment_meta meta;
 
-    reader->read(dir, meta, writer->filename(expected));
+    reader->read(dir, meta, filename);
 
     ASSERT_EQ(expected, meta);
     ASSERT_TRUE(irs::segment_reader::has<irs::columnstore_reader>(meta));
@@ -404,17 +405,17 @@ TEST(segment_reader_test, segment_reader_has) {
 }
 
 TEST(segment_reader_test, open_invalid_segment) {
-  ir::memory_directory dir;
-  ir::version10::format codec;
-  ir::format::ptr codec_ptr(&codec, [](ir::format*)->void{});
+  irs::memory_directory dir;
+  auto codec_ptr = irs::formats::get("1_0");
+  ASSERT_NE(nullptr, codec_ptr);
 
   /* open invalid segment */
   {
-    ir::segment_meta meta;
+    irs::segment_meta meta;
     meta.codec = codec_ptr;
     meta.name = "invalid_segment_name";
 
-    ASSERT_THROW(ir::segment_reader::open(dir, meta), ir::detailed_io_error);
+    ASSERT_THROW(irs::segment_reader::open(dir, meta), irs::io_error);
   }
 }
 
@@ -432,12 +433,12 @@ TEST(segment_reader_test, open) {
   tests::document const* doc8 = gen.next();
   tests::document const* doc9 = gen.next(); 
 
-  ir::memory_directory dir;
-  ir::version10::format codec;
-  ir::format::ptr codec_ptr(&codec, [](ir::format*)->void{});
+  irs::memory_directory dir;
+  auto codec_ptr = irs::formats::get("1_0");
+  ASSERT_NE(nullptr, codec_ptr);
   {
     // open writer
-    auto writer = ir::index_writer::make(dir, codec_ptr, ir::OM_CREATE);
+    auto writer = irs::index_writer::make(dir, codec_ptr, irs::OM_CREATE);
 
     // add first segment
     ASSERT_TRUE(insert(*writer,
@@ -465,14 +466,14 @@ TEST(segment_reader_test, open) {
 
   // check segment
   {
-    ir::segment_meta meta;
+    irs::segment_meta meta;
     meta.codec = codec_ptr;
     meta.column_store = true;
     meta.docs_count = 5;
     meta.name = "_1";
     meta.version = IRESEARCH_VERSION;
 
-    auto rdr = ir::segment_reader::open(dir, meta);
+    auto rdr = irs::segment_reader::open(dir, meta);
     ASSERT_FALSE(!rdr);
     ASSERT_EQ(1, rdr.size());
     ASSERT_EQ(meta.docs_count, rdr.docs_count());
@@ -555,7 +556,7 @@ TEST(segment_reader_test, open) {
 
       // check field
       {       
-        const ir::string_ref name = "name";
+        const irs::string_ref name = "name";
         auto field = rdr.field(name);
         ASSERT_EQ(name, field->meta().name);
 
@@ -565,19 +566,19 @@ TEST(segment_reader_test, open) {
 
         ASSERT_EQ(5, terms->size());
         ASSERT_EQ(5, terms->docs_count());
-        ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("A")), (terms->min)());
-        ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("E")), (terms->max)());
+        ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("A")), (terms->min)());
+        ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("E")), (terms->max)());
 
         auto term = terms->iterator();
 
         // check term: A
         {
           ASSERT_TRUE(term->next());
-          ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("A")), term->value());
+          ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("A")), term->value());
 
           // check docs
           {
-            auto docs = term->postings(ir::flags::empty_instance());
+            auto docs = term->postings(irs::flags::empty_instance());
             ASSERT_TRUE(docs->next());
             ASSERT_EQ(1, docs->value());
             ASSERT_FALSE(docs->next());
@@ -587,11 +588,11 @@ TEST(segment_reader_test, open) {
         // check term: B
         {
           ASSERT_TRUE(term->next());
-          ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("B")), term->value());
+          ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("B")), term->value());
 
           // check docs
           {
-            auto docs = term->postings(ir::flags::empty_instance());
+            auto docs = term->postings(irs::flags::empty_instance());
             ASSERT_TRUE(docs->next());
             ASSERT_EQ(2, docs->value());
             ASSERT_FALSE(docs->next());
@@ -601,11 +602,11 @@ TEST(segment_reader_test, open) {
         // check term: C
         {
           ASSERT_TRUE(term->next());
-          ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("C")), term->value());
+          ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("C")), term->value());
 
           // check docs
           {
-            auto docs = term->postings(ir::flags::empty_instance());
+            auto docs = term->postings(irs::flags::empty_instance());
             ASSERT_TRUE(docs->next());
             ASSERT_EQ(3, docs->value());
             ASSERT_FALSE(docs->next());
@@ -615,11 +616,11 @@ TEST(segment_reader_test, open) {
         // check term: D
         {
           ASSERT_TRUE(term->next());
-          ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("D")), term->value());
+          ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("D")), term->value());
 
           // check docs
           {
-            auto docs = term->postings(ir::flags::empty_instance());
+            auto docs = term->postings(irs::flags::empty_instance());
             ASSERT_TRUE(docs->next());
             ASSERT_EQ(4, docs->value());
             ASSERT_FALSE(docs->next());
@@ -629,11 +630,11 @@ TEST(segment_reader_test, open) {
         // check term: E
         {
           ASSERT_TRUE(term->next());
-          ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("E")), term->value());
+          ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("E")), term->value());
 
           // check docs
           {
-            auto docs = term->postings(ir::flags::empty_instance());
+            auto docs = term->postings(irs::flags::empty_instance());
             ASSERT_TRUE(docs->next());
             ASSERT_EQ(5, docs->value());
             ASSERT_FALSE(docs->next());
@@ -645,7 +646,7 @@ TEST(segment_reader_test, open) {
 
       // check field
       {
-        const ir::string_ref name = "seq";
+        const irs::string_ref name = "seq";
         auto field = rdr.field(name);
         ASSERT_EQ(name, field->meta().name);
 
@@ -656,7 +657,7 @@ TEST(segment_reader_test, open) {
 
       // check field
       {
-        const ir::string_ref name = "same";
+        const irs::string_ref name = "same";
         auto field = rdr.field(name);
         ASSERT_EQ(name, field->meta().name);
 
@@ -665,19 +666,19 @@ TEST(segment_reader_test, open) {
         ASSERT_NE(nullptr, terms);
         ASSERT_EQ(1, terms->size());
         ASSERT_EQ(5, terms->docs_count());
-        ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("xyz")), (terms->min)());
-        ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("xyz")), (terms->max)());
+        ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("xyz")), (terms->min)());
+        ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("xyz")), (terms->max)());
 
         auto term = terms->iterator();
 
         // check term: xyz
         {
           ASSERT_TRUE(term->next());
-          ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("xyz")), term->value());
+          ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("xyz")), term->value());
 
           /* check docs */
           {
-            auto docs = term->postings(ir::flags::empty_instance());
+            auto docs = term->postings(irs::flags::empty_instance());
             ASSERT_TRUE(docs->next());
             ASSERT_EQ(1, docs->value());
             ASSERT_TRUE(docs->next());
@@ -697,7 +698,7 @@ TEST(segment_reader_test, open) {
 
       // check field
       {
-        const ir::string_ref name = "duplicated";
+        const irs::string_ref name = "duplicated";
         auto field = rdr.field(name);
         ASSERT_EQ(name, field->meta().name);
 
@@ -706,19 +707,19 @@ TEST(segment_reader_test, open) {
         ASSERT_NE(nullptr, terms);
         ASSERT_EQ(2, terms->size());
         ASSERT_EQ(4, terms->docs_count());
-        ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("abcd")), (terms->min)());
-        ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("vczc")), (terms->max)());
+        ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("abcd")), (terms->min)());
+        ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("vczc")), (terms->max)());
 
         auto term = terms->iterator();
 
         // check term: abcd
         {
           ASSERT_TRUE(term->next());
-          ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("abcd")), term->value());
+          ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("abcd")), term->value());
 
           // check docs
           {
-            auto docs = term->postings(ir::flags::empty_instance());
+            auto docs = term->postings(irs::flags::empty_instance());
             ASSERT_TRUE(docs->next());
             ASSERT_EQ(1, docs->value());
             ASSERT_TRUE(docs->next());
@@ -730,11 +731,11 @@ TEST(segment_reader_test, open) {
         // check term: vczc
         {
           ASSERT_TRUE(term->next());
-          ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("vczc")), term->value());
+          ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("vczc")), term->value());
 
           // check docs
           {
-            auto docs = term->postings(ir::flags::empty_instance());
+            auto docs = term->postings(irs::flags::empty_instance());
             ASSERT_TRUE(docs->next());
             ASSERT_EQ(2, docs->value());
             ASSERT_TRUE(docs->next());
@@ -748,7 +749,7 @@ TEST(segment_reader_test, open) {
 
       // check field
       {
-        const ir::string_ref name = "prefix";
+        const irs::string_ref name = "prefix";
         auto field = rdr.field(name);
         ASSERT_EQ(name, field->meta().name);
 
@@ -757,19 +758,19 @@ TEST(segment_reader_test, open) {
         ASSERT_NE(nullptr, terms);
         ASSERT_EQ(2, terms->size());
         ASSERT_EQ(2, terms->docs_count());
-        ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("abcd")), (terms->min)());
-        ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("abcde")), (terms->max)());
+        ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("abcd")), (terms->min)());
+        ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("abcde")), (terms->max)());
 
         auto term = terms->iterator();
 
         // check term: abcd
         {
           ASSERT_TRUE(term->next());
-          ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("abcd")), term->value());
+          ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("abcd")), term->value());
 
           // check docs
           {
-            auto docs = term->postings(ir::flags::empty_instance());
+            auto docs = term->postings(irs::flags::empty_instance());
             ASSERT_TRUE(docs->next());
             ASSERT_EQ(1, docs->value());
             ASSERT_FALSE(docs->next());
@@ -779,11 +780,11 @@ TEST(segment_reader_test, open) {
         // check term: abcde
         {
           ASSERT_TRUE(term->next());
-          ASSERT_EQ(ir::ref_cast<ir::byte_type>(ir::string_ref("abcde")), term->value());
+          ASSERT_EQ(irs::ref_cast<irs::byte_type>(irs::string_ref("abcde")), term->value());
 
           // check docs
           {
-            auto docs = term->postings(ir::flags::empty_instance());
+            auto docs = term->postings(irs::flags::empty_instance());
             ASSERT_TRUE(docs->next());
             ASSERT_EQ(4, docs->value());
             ASSERT_FALSE(docs->next());
@@ -795,9 +796,13 @@ TEST(segment_reader_test, open) {
 
       // invalid field
       {
-        const ir::string_ref name = "invalid_field";
+        const irs::string_ref name = "invalid_field";
         ASSERT_EQ(nullptr, rdr.field(name));
       }
     }
   }
 }
+
+// -----------------------------------------------------------------------------
+// --SECTION--                                                       END-OF-FILE
+// -----------------------------------------------------------------------------

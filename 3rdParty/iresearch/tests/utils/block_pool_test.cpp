@@ -23,6 +23,7 @@
 
 #include "tests_shared.hpp"
 #include "utils/string.hpp"
+#include "utils/string_utils.hpp"
 #include "utils/block_pool.hpp"
 #include "utils/misc.hpp"
 
@@ -53,41 +54,41 @@ class block_pool_test : public test_base {
 
   void next_buffer_clear() {
     ASSERT_EQ( BlockSize, size_t(block_type::SIZE) );
-    ASSERT_EQ( 0, pool_.count() );
-    ASSERT_EQ( 0, pool_.size() );
+    ASSERT_EQ(0, pool_.block_count());
+    ASSERT_EQ(0, pool_.value_count());
     ASSERT_EQ( pool_.begin(), pool_.end() );
 
     /* add buffer */
     pool_.alloc_buffer();
-    ASSERT_EQ( 1, pool_.count() );
-    ASSERT_EQ( BlockSize, pool_.size() );
+    ASSERT_EQ(1, pool_.block_count());
+    ASSERT_EQ(BlockSize, pool_.value_count());
     ASSERT_NE( pool_.begin(), pool_.end() );
 
     /* add several buffers */
     const size_t count = 15;
     pool_.alloc_buffer( count );
-    ASSERT_EQ( 1 + count, pool_.count() );
-    ASSERT_EQ( BlockSize*(1+count), pool_.size() );
+    ASSERT_EQ(1 + count, pool_.block_count());
+    ASSERT_EQ(BlockSize * (1 + count), pool_.value_count());
     ASSERT_NE( pool_.begin(), pool_.end() );
 
     /* clear buffers */
     pool_.clear();
-    ASSERT_EQ( 0, pool_.count() );
-    ASSERT_EQ( 0, pool_.size() );
+    ASSERT_EQ(0, pool_.block_count());
+    ASSERT_EQ(0, pool_.value_count());
     ASSERT_EQ( pool_.begin(), pool_.end() );
   }
 
   void write_read(uint32_t max, uint32_t step) {
     inserter_t w( pool_.begin() );
 
-    for ( int i = 0; max; i += step, --max ) {
-      bytes_io<int>::vwrite( w, i );
+    for ( uint32_t i = 0; max; i += step, --max ) {
+      irs::vwrite<uint32_t>( w, i );
     }
 
     auto it = pool_.begin();
 
-    for ( int i = 0; max; i += step, --max ) {
-      ASSERT_EQ( i, bytes_io<int>::vread( it ) );
+    for ( uint32_t i = 0; max; i += step, --max ) {
+      ASSERT_EQ( i, irs::vread<uint32_t>( it ) );
     }
   }
 
@@ -102,8 +103,8 @@ class block_pool_test : public test_base {
     std::string slice_data("test_data");
 
     int count = max;
-    for ( int i = 0; count; i += step, --count ) {
-      bytes_io<int>::vwrite( w, i );
+    for ( uint32_t i = 0; count; i += step, --count ) {
+      irs::vwrite<uint32_t>( w, i );
 
       if (i % 3 == 0) { // write data within slice
         w.write(reinterpret_cast<const byte_type*>(slice_data.c_str()), slice_data.size());
@@ -117,13 +118,14 @@ class block_pool_test : public test_base {
     sliced_reader_t r( pool_.begin(), w.pool_offset() );
 
     count = max;
-    for ( int i = 0; count; i += step, --count ) {
-      int res = bytes_io<int>::vread( r );
+    for ( uint32_t i = 0; count; i += step, --count ) {
+      int res = irs::vread<uint32_t>( r );
+
       EXPECT_EQ( i, res );
 
       if (i % 3 == 0) { // read data within slice
         bstring payload;
-        size_t size = r.read(&(oversize(payload, slice_data.size())[0]), slice_data.size());
+        size_t size = r.read(&(string_utils::oversize(payload, slice_data.size())[0]), slice_data.size());
         EXPECT_TRUE(slice_data.size() == size);
         EXPECT_TRUE(memcmp(slice_data.c_str(), payload.data(), std::min(slice_data.size(), size)) == 0);
       }
@@ -277,3 +279,7 @@ TEST_F(byte_block_pool_test, slice_alignment_with_reuse) {
 TEST_F(byte_block_pool_test, slice_chunked_read_write) {
   slice_chunked_read_write();
 }
+
+// -----------------------------------------------------------------------------
+// --SECTION--                                                       END-OF-FILE
+// -----------------------------------------------------------------------------

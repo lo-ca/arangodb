@@ -39,7 +39,8 @@ struct Section {
         description(description),
         alias(alias),
         hidden(hidden),
-        obsolete(obsolete) {}
+        obsolete(obsolete),
+        enterpriseOnly(false) {}
 
   // adds a program option to the section
   void addOption(Option const& option);
@@ -51,7 +52,8 @@ struct Section {
   bool hasOptions() const;
 
   // print help for a section
-  // the special search string "." will show help for all sections, even if hidden
+  // the special search string "." will show help for all sections, even if
+  // hidden
   void printHelp(std::string const& search, size_t tw, size_t ow, bool colors) const;
 
   // determine display width for a section
@@ -62,11 +64,23 @@ struct Section {
   std::string alias;
   bool hidden;
   bool obsolete;
+  bool enterpriseOnly;
 
   // program options of the section
   std::map<std::string, Option> options;
 };
-}
-}
+
+/// @brief section only available in enterprise builds
+/// must have the same storage layout as struct Section
+struct EnterpriseSection : public Section {
+  EnterpriseSection(std::string const& name, std::string const& description,
+                    std::string const& alias, bool hidden, bool obsolete)
+      : Section(name, description, alias, hidden, obsolete) {
+    enterpriseOnly = true;
+  }
+};
+
+}  // namespace options
+}  // namespace arangodb
 
 #endif

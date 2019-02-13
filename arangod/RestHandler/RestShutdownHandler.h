@@ -36,9 +36,9 @@ class RestShutdownHandler : public RestBaseHandler {
 
  public:
   char const* name() const override final { return "RestShutdownHandler"; }
-  bool isDirect() const override;
+  RequestLane lane() const override final { return RequestLane::CLIENT_FAST; }
   RestStatus execute() override;
 };
-}
+}  // namespace arangodb
 
 #endif

@@ -22,9 +22,17 @@
 // / @author Alan Plum
 // //////////////////////////////////////////////////////////////////////////////
 
-const isCluster = require('@arangodb/cluster').isCluster();
-var tasks = require('@arangodb/tasks');
-var db = require('@arangodb').db;
+const cluster = require('@arangodb/cluster');
+const isCluster = cluster.isCluster();
+const tasks = require('@arangodb/tasks');
+const db = require('@arangodb').db;
+const foxxManager = require('@arangodb/foxx/manager');
+
+const coordinatorId = (
+  isCluster && cluster.isCoordinator()
+  ? cluster.coordinatorId()
+  : undefined
+);
 
 var runInDatabase = function () {
   var busy = false;
@@ -45,10 +53,6 @@ var runInDatabase = function () {
             busy = true;
             return;
           }
-          // should always call the user who called createQueue
-          // registerTask will throw a forbidden exception if anyone
-          // other than superroot uses this option
-          let runAsUser = queue.runAsUser || '';
 
           var now = Date.now();
           var max = queue.maxWorkers - numBusy;
@@ -67,9 +71,13 @@ var runInDatabase = function () {
           }
 
           jobs.forEach(function (job) {
-            db._jobs.update(job, {
+            const update = {
               status: 'progress'
-            });
+            };
+            if (isCluster) {
+              update.startedBy = coordinatorId;
+            }
+            db._jobs.update(job, update);
             tasks.register({
               command: function (cfg) {
                 var db = require('@arangodb').db;
@@ -82,7 +90,6 @@ var runInDatabase = function () {
               },
               offset: 0,
               isSystem: true,
-              runAsUser: runAsUser,
               params: {
                 job: Object.assign({}, job, {
                   status: 'progress'
@@ -99,16 +106,74 @@ var runInDatabase = function () {
   }
 };
 
+const resetDeadJobs = function () {
+  const queues = require('@arangodb/foxx/queues');
+
+  const initialDatabase = db._name();
+  db._databases().forEach(function (name) {
+    try {
+      db._useDatabase(name);
+      db._jobs.toArray().filter(function (job) {
+        return job.status === 'progress';
+      }).forEach(function (job) {
+        db._jobs.update(job._id, {status: 'pending'});
+      });
+      if (!isCluster) {
+        queues._updateQueueDelay();
+      } else {
+        global.KEYSPACE_CREATE('queue-control', 1, true);
+      }
+    } catch (e) {
+      // noop
+    }
+  });
+  db._useDatabase(initialDatabase);
+};
+
+const resetDeadJobsOnFirstRun = function () {
+  const foxxmasterInitialized
+    = global.KEY_GET('queue-control', 'foxxmasterInitialized') || 0;
+  const foxxmasterSince = global.ArangoServerState.getFoxxmasterSince();
+
+  if (foxxmasterSince <= 0) {
+    console.error(
+      "It's unknown since when this is a Foxxmaster. "
+      + 'This is probably a bug in the Foxx queues, please report this error.'
+    );
+  }
+  if (foxxmasterInitialized > foxxmasterSince) {
+    console.error(
+      'HLC seems to have decreased, which can never happen. '
+      + 'This is probably a bug in the Foxx queues, please report this error.'
+    );
+  }
+
+  if (foxxmasterInitialized < foxxmasterSince) {
+    // We've not run this (successfully) since we got to be Foxxmaster.
+    resetDeadJobs();
+    global.KEY_SET('queue-control', 'foxxmasterInitialized', foxxmasterSince);
+  }
+};
+
 exports.manage = function () {
   if (!global.ArangoServerState.isFoxxmaster()) {
     return;
   }
 
-  if (isCluster && global.ArangoServerState.getFoxxmasterQueueupdate()) {
-    var foxxQueues = require('@arangodb/foxx/queues');
-    foxxQueues._updateQueueDelay();
-    global.ArangoAgency.set('Current/FoxxmasterQueueupdate', false);
-    // global.ArangoServerState.setFoxxmasterQueueupdate(false);
+  if (global.ArangoServerState.getFoxxmasterQueueupdate()) {
+    if (isCluster) {
+      // Reset jobs before updating the queue delay. Don't continue on errors,
+      // but retry later.
+      resetDeadJobsOnFirstRun();
+      var foxxQueues = require('@arangodb/foxx/queues');
+      foxxQueues._updateQueueDelay();
+    } else {
+      // On a Foxxmaster change FoxxmasterQueueupdate is set to true
+      // we use this to signify a Leader change to this server
+      foxxManager.healAll(true);
+    }
+    // do not call again immediately
+    global.ArangoServerState.setFoxxmasterQueueupdate(false);
   }
 
   var initialDatabase = db._name();
@@ -174,26 +239,9 @@ exports.run = function () {
   }
 
   global.KEYSPACE_CREATE('queue-control', 1, true);
-
-  var initialDatabase = db._name();
-  db._databases().forEach(function (name) {
-    try {
-      db._useDatabase(name);
-      db._jobs.toArray().filter(function(job) {
-        return job.status === 'progress';
-      }).forEach(function(job) {
-        db._jobs.update(job._id, { status: 'pending' });
-      });
-      if (!isCluster) {
-        queues._updateQueueDelay();
-      } else {
-        global.KEYSPACE_CREATE('queue-control', 1, true);
-      }
-    } catch (e) {
-      // noop
-    }
-  });
-  db._useDatabase(initialDatabase);
+  if (!isCluster) {
+    resetDeadJobs();
+  }
 
   if (tasks.register !== undefined) {
     tasks.register({

@@ -24,12 +24,12 @@
 #ifndef ARANGOD_AQL_COLLECT_NODE_H
 #define ARANGOD_AQL_COLLECT_NODE_H 1
 
-#include "Basics/Common.h"
 #include "Aql/Aggregator.h"
 #include "Aql/CollectOptions.h"
 #include "Aql/ExecutionNode.h"
-#include "Aql/types.h"
 #include "Aql/Variable.h"
+#include "Aql/types.h"
+#include "Basics/Common.h"
 #include "VocBase/voc-types.h"
 #include "VocBase/vocbase.h"
 
@@ -45,23 +45,20 @@ class RedundantCalculationsReplacer;
 class CollectNode : public ExecutionNode {
   friend class ExecutionNode;
   friend class ExecutionBlock;
-  friend class HashedCollectBlock;
   friend class RedundantCalculationsReplacer;
   friend class SortedCollectBlock;
+  friend class HashedCollectBlock;
   friend class DistinctCollectBlock;
+  friend class CountCollectBlock;
 
  public:
-  CollectNode(
-      ExecutionPlan* plan, size_t id, CollectOptions const& options,
-      std::vector<std::pair<Variable const*, Variable const*>> const&
-          groupVariables,
-      std::vector<std::pair<Variable const*,
-                            std::pair<Variable const*, std::string>>> const&
-          aggregateVariables,
-      Variable const* expressionVariable, Variable const* outVariable,
-      std::vector<Variable const*> const& keepVariables,
-      std::unordered_map<VariableId, std::string const> const& variableMap,
-      bool count, bool isDistinctCommand)
+  CollectNode(ExecutionPlan* plan, size_t id, CollectOptions const& options,
+              std::vector<std::pair<Variable const*, Variable const*>> const& groupVariables,
+              std::vector<std::pair<Variable const*, std::pair<Variable const*, std::string>>> const& aggregateVariables,
+              Variable const* expressionVariable, Variable const* outVariable,
+              std::vector<Variable const*> const& keepVariables,
+              std::unordered_map<VariableId, std::string const> const& variableMap,
+              bool count, bool isDistinctCommand)
       : ExecutionNode(plan, id),
         _options(options),
         _groupVariables(groupVariables),
@@ -77,17 +74,13 @@ class CollectNode : public ExecutionNode {
     TRI_ASSERT(!_count || _outVariable != nullptr);
   }
 
-  CollectNode(
-      ExecutionPlan*, arangodb::velocypack::Slice const& base,
-      Variable const* expressionVariable, Variable const* outVariable,
-      std::vector<Variable const*> const& keepVariables,
-      std::unordered_map<VariableId, std::string const> const& variableMap,
-      std::vector<std::pair<Variable const*, Variable const*>> const&
-          collectVariables,
-      std::vector<std::pair<Variable const*,
-                            std::pair<Variable const*, std::string>>> const&
-          aggregateVariables,
-      bool count, bool isDistinctCommand);
+  CollectNode(ExecutionPlan*, arangodb::velocypack::Slice const& base,
+              Variable const* expressionVariable, Variable const* outVariable,
+              std::vector<Variable const*> const& keepVariables,
+              std::unordered_map<VariableId, std::string const> const& variableMap,
+              std::vector<std::pair<Variable const*, Variable const*>> const& collectVariables,
+              std::vector<std::pair<Variable const*, std::pair<Variable const*, std::string>>> const& aggregateVariables,
+              bool count, bool isDistinctCommand);
 
   ~CollectNode();
 
@@ -120,24 +113,32 @@ class CollectNode : public ExecutionNode {
   CollectOptions& getOptions() { return _options; }
 
   /// @brief export to VelocyPack
-  void toVelocyPackHelper(arangodb::velocypack::Builder&,
-                          bool) const override final;
+  void toVelocyPackHelper(arangodb::velocypack::Builder&, unsigned flags) const override final;
+
+  /// @brief creates corresponding ExecutionBlock
+  std::unique_ptr<ExecutionBlock> createBlock(
+      ExecutionEngine& engine,
+      std::unordered_map<ExecutionNode*, ExecutionBlock*> const&) const override;
 
   /// @brief clone ExecutionNode recursively
   ExecutionNode* clone(ExecutionPlan* plan, bool withDependencies,
                        bool withProperties) const override final;
 
   /// @brief estimateCost
-  double estimateCost(size_t&) const override final;
+  CostEstimate estimateCost() const override final;
 
   /// @brief whether or not the count flag is set
-  inline bool count() const { return _count; }
-  
-  inline bool hasOutVariableButNoCount() const { return (_outVariable != nullptr && !_count); }
+  bool count() const { return _count; }
+  /// @brief set the count option
+  void count(bool value) { _count = value; }
+
+  inline bool hasOutVariableButNoCount() const {
+    return (_outVariable != nullptr && !_count);
+  }
 
   /// @brief whether or not the node has an outVariable (i.e. INTO ...)
   inline bool hasOutVariable() const { return _outVariable != nullptr; }
-  
+
   /// @brief return the out variable
   Variable const* outVariable() const { return _outVariable; }
 
@@ -148,9 +149,12 @@ class CollectNode : public ExecutionNode {
     _count = false;
   }
 
+  void setAggregateVariables(
+      std::vector<std::pair<Variable const*, std::pair<Variable const*, std::string>>> const& aggregateVariables);
+
   /// @brief clear one of the aggregates
-  void clearAggregates(std::function<bool(std::pair<
-      Variable const*, std::pair<Variable const*, std::string>> const&)> cb) {
+  void clearAggregates(
+      std::function<bool(std::pair<Variable const*, std::pair<Variable const*, std::string>> const&)> cb) {
     for (auto it = _aggregateVariables.begin(); it != _aggregateVariables.end();
          /* no hoisting */) {
       if (cb(*it)) {
@@ -168,9 +172,22 @@ class CollectNode : public ExecutionNode {
   }
 
   /// @brief set the expression variable
-  void setExpressionVariable(Variable const* variable) {
+  void expressionVariable(Variable const* variable) {
     TRI_ASSERT(!hasExpressionVariable());
     _expressionVariable = variable;
+  }
+
+  /// @brief return whether or not the collect has keep variables
+  bool hasKeepVariables() const { return !_keepVariables.empty(); }
+
+  /// @brief return the keep variables
+  std::vector<Variable const*> const& keepVariables() const {
+    return _keepVariables;
+  }
+
+  /// @brief set list of variables to keep if INTO is used
+  void setKeepVariables(std::vector<Variable const*>&& variables) {
+    _keepVariables = std::move(variables);
   }
 
   /// @brief return the variable map
@@ -179,24 +196,27 @@ class CollectNode : public ExecutionNode {
   }
 
   /// @brief get all group variables (out, in)
-  std::vector<std::pair<Variable const*, Variable const*>> const&
-  groupVariables() const {
+  std::vector<std::pair<Variable const*, Variable const*>> const& groupVariables() const {
     return _groupVariables;
   }
 
+  /// @brief set all group variables (out, in)
+  void groupVariables(std::vector<std::pair<Variable const*, Variable const*>> const& vars) {
+    _groupVariables = vars;
+  }
+
   /// @brief get all aggregate variables (out, in)
-  std::vector<std::pair<Variable const*,
-                        std::pair<Variable const*, std::string>>> const&
-  aggregateVariables() const {
+  std::vector<std::pair<Variable const*, std::pair<Variable const*, std::string>>> const& aggregateVariables() const {
     return _aggregateVariables;
   }
 
-  /// @brief getVariablesUsedHere, returning a vector
-  std::vector<Variable const*> getVariablesUsedHere() const override final;
+  /// @brief get all aggregate variables (out, in)
+  std::vector<std::pair<Variable const*, std::pair<Variable const*, std::string>>>& aggregateVariables() {
+    return _aggregateVariables;
+  }
 
   /// @brief getVariablesUsedHere, modifying the set in-place
-  void getVariablesUsedHere(
-      std::unordered_set<Variable const*>& vars) const override final;
+  void getVariablesUsedHere(arangodb::HashSet<Variable const*>& vars) const override final;
 
   /// @brief getVariablesSetHere
   std::vector<Variable const*> getVariablesSetHere() const override final {
@@ -224,9 +244,7 @@ class CollectNode : public ExecutionNode {
   std::vector<std::pair<Variable const*, Variable const*>> _groupVariables;
 
   /// @brief input/output variables for the aggregation (out, in)
-  std::vector<
-      std::pair<Variable const*, std::pair<Variable const*, std::string>>>
-      _aggregateVariables;
+  std::vector<std::pair<Variable const*, std::pair<Variable const*, std::string>>> _aggregateVariables;
 
   /// @brief input expression variable (might be null)
   Variable const* _expressionVariable;
@@ -250,7 +268,7 @@ class CollectNode : public ExecutionNode {
   bool _specialized;
 };
 
-}  // namespace arangodb::aql
+}  // namespace aql
 }  // namespace arangodb
 
 #endif

@@ -334,6 +334,30 @@ TEST_F(async_utils_tests, test_read_write_mutex_mt) {
     std::thread thread5([&w_wrapper]()->void{ std::unique_lock<w_mutex_t> lock(w_wrapper, std::try_to_lock); ASSERT_TRUE(lock.owns_lock()); });
     thread5.join();
   }
+
+  // reader recursive with writer pending
+  {
+    mutex_t mutex;
+    r_mutex_t r_wrapper(mutex);
+    w_mutex_t w_wrapper(mutex);
+
+    {
+      std::unique_lock<r_mutex_t> lock0(r_wrapper);
+
+      // write-pending
+      std::thread thread0([&w_wrapper]()->void{ std::unique_lock<w_mutex_t> lock(w_wrapper); });
+      std::this_thread::sleep_for(std::chrono::milliseconds(100)); // assume thread starts within 100msec
+
+      {
+        std::unique_lock<r_mutex_t> lock1(r_wrapper, std::try_to_lock);
+        ASSERT_FALSE(lock1.owns_lock()); // cannot aquire recursive read-lock if write-lock pending (limitation)
+      }
+
+      lock0.unlock();
+      thread0.join();
+    }
+  }
+
 }
 
 TEST_F(async_utils_tests, test_thread_pool_run_mt) {
@@ -599,8 +623,8 @@ TEST_F(async_utils_tests, test_thread_pool_stop_mt) {
 
     auto result = cond.wait_for(lock2, std::chrono::milliseconds(1000)); // assume thread blocks in 1000ms
 
-    // MSVC 2015/2017 optimized code seems to sporadically notify condition variables without explicit request
-    MSVC2015_OPTIMIZED_ONLY(while(!stop && result == std::cv_status::no_timeout) result = cond2.wait_for(lock2, std::chrono::milliseconds(1000)));
+    // MSVC 2015/2017 seems to sporadically notify condition variables without explicit request
+    MSVC2015_ONLY(while(!stop && result == std::cv_status::no_timeout) result = cond2.wait_for(lock2, std::chrono::milliseconds(1000)));
     MSVC2017_ONLY(while(!stop && result == std::cv_status::no_timeout) result = cond2.wait_for(lock2, std::chrono::milliseconds(1000)));
 
     ASSERT_EQ(std::cv_status::timeout, result);

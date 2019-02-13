@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2014-2016 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2014-2018 ArangoDB GmbH, Cologne, Germany
 /// Copyright 2004-2014 triAGENS GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,157 +25,160 @@
 #ifndef ARANGOD_SCHEDULER_SCHEDULER_H
 #define ARANGOD_SCHEDULER_SCHEDULER_H 1
 
-#include "Basics/Common.h"
+#include <condition_variable>
+#include <mutex>
+#include <queue>
 
-#include <boost/asio/steady_timer.hpp>
-
-#include "Basics/Mutex.h"
-#include "Basics/asio-helper.h"
-#include "Basics/socket-utils.h"
-#include "Scheduler/EventLoop.h"
-#include "Scheduler/Job.h"
+#include "GeneralServer/RequestLane.h"
+#include "Logger/Logger.h"
 
 namespace arangodb {
-class JobQueue;
-class JobGuard;
 
 namespace velocypack {
 class Builder;
 }
 
-namespace rest {
+class Scheduler;
+class SchedulerThread;
+class SchedulerCronThread;
 
 class Scheduler {
-  Scheduler(Scheduler const&) = delete;
-  Scheduler& operator=(Scheduler const&) = delete;
-
-  friend class arangodb::JobGuard;
-
  public:
-  Scheduler(uint64_t nrMinimum, uint64_t nrDesired, uint64_t nrMaximum,
-            uint64_t maxQueueSize);
+  explicit Scheduler();
   virtual ~Scheduler();
 
+  // ---------------------------------------------------------------------------
+  // Scheduling and Task Queuing - the relevant stuff
+  // ---------------------------------------------------------------------------
  public:
-  boost::asio::io_service* ioService() const { return _ioService.get(); }
-  boost::asio::io_service* managerService() const {
-    return _managerService.get();
-  }
+  class WorkItem;
+  typedef std::chrono::steady_clock clock;
+  typedef std::shared_ptr<WorkItem> WorkHandle;
 
-  EventLoop eventLoop() {
-    // return EventLoop{._ioService = *_ioService.get(), ._scheduler = this};
-    // windows complains ...
-    return EventLoop{_ioService.get(), this};
-  }
+  // Enqueues a task - this is implemented on the specific scheduler
+  virtual bool queue(RequestLane lane, std::function<void()>) = 0;
 
-  void post(std::function<void()> callback);
+  // Enqueues a task after delay - this uses the queue functions above.
+  // WorkHandle is a shared_ptr to a WorkItem. If all references the WorkItem
+  // are dropped, the task is canceled.
+  virtual WorkHandle queueDelay(RequestLane lane, clock::duration delay,
+                                std::function<void(bool canceled)> handler);
 
-  bool start();
-  bool isRunning() const { return numRunning(_counters) > 0; }
+  class WorkItem {
+   public:
+    virtual ~WorkItem() { cancel(); };
 
-  void beginShutdown();
-  void stopRebalancer() noexcept;
-  bool isStopping() { return (_counters & (1ULL << 63)) != 0; }
-  void shutdown();
+    // Cancels the WorkItem
+    void cancel() { executeWithCancel(true); }
 
- public:
-  // decrements the nrRunning counter for the thread
-  void stopThread();
+    // Runs the WorkItem immediately
+    void run() { executeWithCancel(false); }
 
-  // check if the current thread should be stopped
-  // returns true if yes, otherwise false. when the function returns
-  // true, it has already decremented the nrRunning counter!
-  bool stopThreadIfTooMany(double now);
+    explicit WorkItem(std::function<void(bool canceled)>&& handler,
+                      RequestLane lane, Scheduler* scheduler)
+        : _handler(std::move(handler)), _lane(lane), _disable(false), _scheduler(scheduler){};
 
-  bool shouldQueueMore() const;
-  bool hasQueueCapacity() const;
+   private:
+    // This is not copyable or movable
+    WorkItem(WorkItem const&) = delete;
+    WorkItem(WorkItem&&) = delete;
+    void operator=(WorkItem const&) const = delete;
 
-  /// queue processing of an async rest job
-  bool queue(std::unique_ptr<Job> job);
-  
-  std::string infoStatus();
-
-  uint64_t minimum() const { return _nrMinimum; }
-  inline uint64_t numQueued() const noexcept { return  _nrQueued; };
-  inline uint64_t getCounters() const noexcept { return _counters; }
-  static uint64_t numRunning(uint64_t value) noexcept { return value & 0xFFFFULL; }
-  static uint64_t numWorking(uint64_t value) noexcept { return (value >> 16) & 0xFFFFULL; }
-  static uint64_t numBlocked(uint64_t value) noexcept { return (value >> 32) & 0xFFFFULL; }
-
-  inline void queueJob() noexcept { ++_nrQueued; } 
-  inline void unqueueJob() noexcept { 
-    if (--_nrQueued == UINT64_MAX) {
-      TRI_ASSERT(false);
+    inline void executeWithCancel(bool arg) {
+      bool disabled = _disable.exchange(true);
+      // If exchange returns false, the item was not yet scheduled.
+      // Hence we are the first dealing with this WorkItem
+      if (disabled == false) {
+        // The following code moves the _handler into the Scheduler.
+        // Thus any reference to class to self in the _handler will be released
+        // as soon as the scheduler executed the _handler lambda.
+        _scheduler->queue(_lane, [handler = std::move(_handler), arg]() {
+          handler(arg);
+        });
+      }
     }
-  }
- 
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+    bool isDisabled() { return _disable.load(); }
+    friend class Scheduler;
+#endif
+
+   private:
+    std::function<void(bool)> _handler;
+    RequestLane _lane;
+    std::atomic<bool> _disable;
+    Scheduler* _scheduler;
+  };
+
+  // ---------------------------------------------------------------------------
+  // CronThread and delayed tasks
+  // ---------------------------------------------------------------------------
  private:
-  void startNewThread();
- 
-  static void initializeSignalHandlers();
+  // The priority queue is managed by a CronThread. It wakes up on a regular basis (10ms currently)
+  // and looks at queue.top(). It the _expire time is smaller than now() and the task is not canceled
+  // it is posted on the scheduler. The next sleep time is computed depending on queue top.
+  //
+  // Note that tasks that have a delay of less than 1ms are posted directly.
+  // For tasks above 50ms the CronThread is woken up to potentially update its sleep time, which
+  // could now be shorter than before.
+
+  // Entry point for the CronThread
+  void runCronThread();
+  friend class SchedulerCronThread;
+
+  // Removed all tasks from the priority queue and cancels them
+  void cancelAllCronTasks();
+
+  typedef std::pair<clock::time_point, std::weak_ptr<WorkItem>> CronWorkItem;
+
+  struct CronWorkItemCompare {
+    bool operator()(CronWorkItem const& left, CronWorkItem const& right) {
+      // Reverse order, because std::priority_queue is a max heap.
+      return right.first < left.first;
+    }
+  };
+
+  std::priority_queue<CronWorkItem, std::vector<CronWorkItem>, CronWorkItemCompare> _cronQueue;
+
+  std::mutex _cronQueueMutex;
+  std::condition_variable _croncv;
+  std::unique_ptr<SchedulerCronThread> _cronThread;
+
+  // ---------------------------------------------------------------------------
+  // Statistics stuff
+  // ---------------------------------------------------------------------------
+ public:
+  struct QueueStatistics {
+    uint64_t _running;
+    uint64_t _working;
+    uint64_t _queued;
+    uint64_t _fifo1;
+    uint64_t _fifo2;
+    uint64_t _fifo3;
+  };
+
+  virtual void addQueueStatistics(velocypack::Builder&) const = 0;
+  virtual QueueStatistics queueStatistics() const = 0;
+  virtual std::string infoStatus() const = 0;
+
+  // ---------------------------------------------------------------------------
+  // Start/Stop/IsRunning stuff
+  // ---------------------------------------------------------------------------
+ public:
+  virtual bool start();
+  virtual void shutdown();
+
+ protected:
+  // You wondering why Scheduler::isStopping() no longer works for you?
+  // Go away and use `application_features::ApplicationServer::isStopping()`
+  // It is made for people that want to know if the should stop doing things.
+  virtual bool isStopping() = 0;
 
  private:
-  // we store most of the threads status info in a single atomic uint64_t
-  // the encoding of the values inside this variable is (left to right means
-  // high to low bytes):
-  // 
-  //   AA BB CC DD
-  // 
-  // we use the lowest 2 bytes (DD) to store the number of running threads
-  // the next lowest bytes (CC) are used to store the number of currently working threads
-  // the next bytes (BB) are used to store the number of currently blocked threads
-  // the highest bytes (AA) are used only to encode a stopping bit. when this bit is
-  // set, the scheduler is stopping (or already stopped)
-  inline void setStopping() noexcept { _counters |= (1ULL << 63); }
-
-  inline void incRunning() noexcept { _counters += 1ULL << 0; }
-  inline void decRunning() noexcept { TRI_ASSERT((_counters & 0xFFFFUL) > 0); _counters -= 1ULL << 0; }
-
-  inline void workThread() noexcept { _counters += 1ULL << 16; } 
-  inline void unworkThread() noexcept { TRI_ASSERT(((_counters & 0XFFFF0000UL) >> 16) > 0); _counters -= 1ULL << 16; }
-
-  inline void blockThread() noexcept { _counters += 1ULL << 32; }
-  inline void unblockThread() noexcept { TRI_ASSERT(((_counters & 0XFFFF00000000UL) >> 32) > 0); _counters -= 1ULL << 32; }
-
-  inline bool isStopping(uint64_t value) const noexcept { return (value & (1ULL << 63)) != 0; }
-
-  void startIoService();
-  void startRebalancer();
-  void startManagerThread();
-  void rebalanceThreads();
-
- private:
-  // maximal number of outstanding user requests
-  uint64_t const _maxQueueSize;
-
-  // minimum number of running SchedulerThreads
-  uint64_t const _nrMinimum;
-
-  // maximal number of outstanding user requests
-  uint64_t const _nrMaximum;
-
-  // current counters. refer to the above description of the 
-  // meaning of its individual bits
-  std::atomic<uint64_t> _counters;
-
-  // number of jobs that are currently been queued, but not worked on
-  std::atomic<uint64_t> _nrQueued;
-
-  std::unique_ptr<JobQueue> _jobQueue;
-
-  boost::shared_ptr<boost::asio::io_service::work> _serviceGuard;
-  std::unique_ptr<boost::asio::io_service> _ioService;
-
-  boost::shared_ptr<boost::asio::io_service::work> _managerGuard;
-  std::unique_ptr<boost::asio::io_service> _managerService;
-
-  std::unique_ptr<boost::asio::steady_timer> _threadManager;
-  std::function<void(const boost::system::error_code&)> _threadHandler;
-
-  mutable Mutex _threadCreateLock;
-  double _lastAllBusyStamp;
+  Scheduler(Scheduler const&) = delete;
+  Scheduler(Scheduler&&) = delete;
+  void operator=(Scheduler const&) = delete;
 };
-}
-}
+
+}  // namespace arangodb
 
 #endif

@@ -129,7 +129,7 @@ Result TransactionalCache::insert(CachedValue* value) {
 
   bucket->unlock();
   if (maybeMigrate) {
-    requestMigrate(_table->idealSize());  // let function do the hard work
+    requestMigrate(source->idealSize());  // let function do the hard work
   }
 
   return status;
@@ -152,7 +152,7 @@ Result TransactionalCache::remove(void const* key, uint32_t keySize) {
 
   if (candidate != nullptr) {
     int64_t change = -static_cast<int64_t>(candidate->size());
-     _metadata.readLock();
+    _metadata.readLock();
     bool allowed = _metadata.adjustUsageIfAllowed(change);
     TRI_ASSERT(allowed);
     _metadata.readUnlock();
@@ -163,7 +163,7 @@ Result TransactionalCache::remove(void const* key, uint32_t keySize) {
 
   bucket->unlock();
   if (maybeMigrate) {
-    requestMigrate(_table->idealSize());
+    requestMigrate(source->idealSize());
   }
 
   return status;
@@ -198,7 +198,7 @@ Result TransactionalCache::blacklist(void const* key, uint32_t keySize) {
 
   bucket->unlock();
   if (maybeMigrate) {
-    requestMigrate(_table->idealSize());
+    requestMigrate(source->idealSize());
   }
 
   return status;
@@ -206,31 +206,28 @@ Result TransactionalCache::blacklist(void const* key, uint32_t keySize) {
 
 uint64_t TransactionalCache::allocationSize(bool enableWindowedStats) {
   return sizeof(TransactionalCache) +
-         (enableWindowedStats ? (sizeof(StatBuffer) +
-                                 StatBuffer::allocationSize(_findStatsCapacity))
-                              : 0);
+         (enableWindowedStats
+              ? (sizeof(StatBuffer) + StatBuffer::allocationSize(_findStatsCapacity))
+              : 0);
 }
 
-std::shared_ptr<Cache> TransactionalCache::create(Manager* manager,
-                                                  uint64_t id,
+std::shared_ptr<Cache> TransactionalCache::create(Manager* manager, uint64_t id,
                                                   Metadata&& metadata,
                                                   std::shared_ptr<Table> table,
                                                   bool enableWindowedStats) {
   return std::make_shared<TransactionalCache>(Cache::ConstructionGuard(),
-                                              manager, id, std::move(metadata), table,
-                                              enableWindowedStats);
+                                              manager, id, std::move(metadata),
+                                              table, enableWindowedStats);
 }
 
-TransactionalCache::TransactionalCache(Cache::ConstructionGuard guard,
-                                       Manager* manager, uint64_t id, Metadata&& metadata,
-                                       std::shared_ptr<Table> table,
-                                       bool enableWindowedStats)
+TransactionalCache::TransactionalCache(Cache::ConstructionGuard guard, Manager* manager,
+                                       uint64_t id, Metadata&& metadata,
+                                       std::shared_ptr<Table> table, bool enableWindowedStats)
     : Cache(guard, manager, id, std::move(metadata), table, enableWindowedStats,
-            TransactionalCache::bucketClearer, TransactionalBucket::slotsData) {
-}
+            TransactionalCache::bucketClearer, TransactionalBucket::slotsData) {}
 
 TransactionalCache::~TransactionalCache() {
-  if (!_shutdown) {
+  if (!isShutdown()) {
     try {
       shutdown();
     } catch (...) {
@@ -262,9 +259,12 @@ uint64_t TransactionalCache::freeMemoryFrom(uint32_t hash) {
 
   bucket->unlock();
 
-  uint32_t size = _table->idealSize();
-  if (maybeMigrate) {
-    requestMigrate(size);
+  cache::Table* table = _table.load(std::memory_order_relaxed);
+  if (table) {
+    int32_t size = table->idealSize();
+    if (maybeMigrate) {
+      requestMigrate(size);
+    }
   }
 
   return reclaimed;
@@ -376,17 +376,16 @@ void TransactionalCache::migrateBucket(void* sourcePtr,
   source->unlock();
 }
 
-std::tuple<Result, TransactionalBucket*, Table*>
-TransactionalCache::getBucket(uint32_t hash, uint64_t maxTries,
-                              bool singleOperation) {
+std::tuple<Result, TransactionalBucket*, Table*> TransactionalCache::getBucket(
+    uint32_t hash, uint64_t maxTries, bool singleOperation) {
   Result status;
   TransactionalBucket* bucket = nullptr;
   Table* source = nullptr;
 
-  Table* table = _table;
+  Table* table = _table.load(std::memory_order_relaxed);
   if (isShutdown() || table == nullptr) {
     status.reset(TRI_ERROR_SHUTTING_DOWN);
-    return std::make_tuple(status, bucket, source);
+    return std::make_tuple(std::move(status), bucket, source);
   }
 
   if (singleOperation) {
@@ -404,7 +403,7 @@ TransactionalCache::getBucket(uint32_t hash, uint64_t maxTries,
     status.reset(TRI_ERROR_LOCK_TIMEOUT);
   }
 
-  return std::make_tuple(status, bucket, source);
+  return std::make_tuple(std::move(status), bucket, source);
 }
 
 Table::BucketClearer TransactionalCache::bucketClearer(Metadata* metadata) {

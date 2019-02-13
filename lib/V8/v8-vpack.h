@@ -37,8 +37,7 @@
 
 v8::Handle<v8::Value> TRI_VPackToV8(
     v8::Isolate* isolate, arangodb::velocypack::Slice const&,
-    arangodb::velocypack::Options const* options =
-        &arangodb::velocypack::Options::Defaults,
+    arangodb::velocypack::Options const* options = &arangodb::velocypack::Options::Defaults,
     arangodb::velocypack::Slice const* base = nullptr);
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -46,7 +45,8 @@ v8::Handle<v8::Value> TRI_VPackToV8(
 ////////////////////////////////////////////////////////////////////////////////
 
 int TRI_V8ToVPack(v8::Isolate* isolate, arangodb::velocypack::Builder& builder,
-                  v8::Handle<v8::Value> const value, bool keepTopLevelOpen);
+                  v8::Local<v8::Value> const value, bool keepTopLevelOpen,
+                  bool convertFunctionsToNull = false);
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief convert a V8 value to VPack value, simplified version

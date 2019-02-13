@@ -27,13 +27,13 @@
 #include "ProgramOptions/ProgramOptions.h"
 
 namespace arangodb {
+
 class StorageEngine;
 
 class EngineSelectorFeature final : public application_features::ApplicationFeature {
  public:
-  explicit EngineSelectorFeature(application_features::ApplicationServer* server);
+  explicit EngineSelectorFeature(application_features::ApplicationServer& server);
 
- public:
   void collectOptions(std::shared_ptr<options::ProgramOptions>) override final;
   void prepare() override final;
   void start() override final;
@@ -48,11 +48,15 @@ class EngineSelectorFeature final : public application_features::ApplicationFeat
   // whether the engine has been started yet
   bool hasStarted() const { return _hasStarted.load(); }
 
-  static char const* engineName();
+  static std::string const& engineName();
 
- public:
-  // selected storage engine. this will contain a pointer to the storage engine after
-  // prepare() and before unprepare()
+  static std::string const& defaultEngine();
+
+  static bool isMMFiles();
+  static bool isRocksDB();
+
+  // selected storage engine. this will contain a pointer to the storage engine
+  // after prepare() and before unprepare()
   static StorageEngine* ENGINE;
 
  private:
@@ -60,6 +64,7 @@ class EngineSelectorFeature final : public application_features::ApplicationFeat
   std::string _engineFilePath;
   std::atomic<bool> _hasStarted;
 };
-}
+
+}  // namespace arangodb
 
 #endif

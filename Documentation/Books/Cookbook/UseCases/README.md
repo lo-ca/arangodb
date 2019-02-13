@@ -1,9 +1,7 @@
 Use Cases / Examples
 ====================
 
-- [Crawling Github with Promises](CrawlingGithubPromises.md)
-
-- [Using ArangoDB with Sails.js](SailsJS.md)
+- [Working with monetary data without precision loss](MonetaryDataWithoutPrecisionLoss.md)
 
 - [Populating a Textbox](PopulatingAnAutocompleteTextbox.md)
 

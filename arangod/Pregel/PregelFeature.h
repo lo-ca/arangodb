@@ -29,6 +29,7 @@
 #include "Basics/Mutex.h"
 
 struct TRI_vocbase_t;
+
 namespace arangodb {
 namespace pregel {
 
@@ -38,14 +39,20 @@ class RecoveryManager;
 
 class PregelFeature final : public application_features::ApplicationFeature {
  public:
-  explicit PregelFeature(application_features::ApplicationServer* server);
+  explicit PregelFeature(application_features::ApplicationServer& server);
   ~PregelFeature();
 
   static PregelFeature* instance();
   static size_t availableParallelism();
 
+  static std::pair<Result, uint64_t> startExecution(
+      TRI_vocbase_t& vocbase, std::string algorithm,
+      std::vector<std::string> const& vertexCollections,
+      std::vector<std::string> const& edgeCollections, VPackSlice const& params);
+
   void start() override final;
   void beginShutdown() override final;
+  void stop() override final;
 
   uint64_t createExecutionNumber();
   void addConductor(std::unique_ptr<Conductor>&&, uint64_t executionNumber);
@@ -66,21 +73,19 @@ class PregelFeature final : public application_features::ApplicationFeature {
     return nullptr;
   }
 
-  static void handleConductorRequest(std::string const& path,
-                                     VPackSlice const& body,
+  static void handleConductorRequest(std::string const& path, VPackSlice const& body,
                                      VPackBuilder& outResponse);
-  static void handleWorkerRequest(TRI_vocbase_t* vocbase,
-                                  std::string const& path,
-                                  VPackSlice const& body,
-                                  VPackBuilder& outBuilder);
+  static void handleWorkerRequest(TRI_vocbase_t& vocbase, std::string const& path,
+                                  VPackSlice const& body, VPackBuilder& outBuilder);
 
  private:
   Mutex _mutex;
   std::unique_ptr<RecoveryManager> _recoveryManager;
-  std::unordered_map<uint64_t, std::shared_ptr<Conductor>> _conductors;
-  std::unordered_map<uint64_t, std::shared_ptr<IWorker>> _workers;
+  std::unordered_map<uint64_t, std::pair<std::string, std::shared_ptr<Conductor>>> _conductors;
+  std::unordered_map<uint64_t, std::pair<std::string, std::shared_ptr<IWorker>>> _workers;
 };
-}
-}
+
+}  // namespace pregel
+}  // namespace arangodb
 
 #endif

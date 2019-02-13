@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2014-2016 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2014-2018 ArangoDB GmbH, Cologne, Germany
 /// Copyright 2004-2014 triAGENS GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,16 +30,18 @@
 struct TRI_vocbase_t;
 
 namespace arangodb {
-  
+
+class Result;
+
 namespace transaction {
 class Methods;
 class Context;
-}
+}  // namespace transaction
 
 namespace aql {
 class Collections;
 class Query;
-}
+}  // namespace aql
 
 namespace graph {
 struct ShortestPathOptions;
@@ -48,7 +50,7 @@ struct ShortestPathOptions;
 namespace velocypack {
 class Builder;
 class Slice;
-}
+}  // namespace velocypack
 
 namespace traverser {
 struct TraverserOptions;
@@ -67,10 +69,12 @@ class BaseEngine {
   // deletes an engine but the registry
   // does not get informed properly
 
-  static std::unique_ptr<BaseEngine> BuildEngine(TRI_vocbase_t* vocbase,
-                                                 arangodb::velocypack::Slice);
+  static std::unique_ptr<BaseEngine> BuildEngine(
+      TRI_vocbase_t& vocbase, std::shared_ptr<transaction::Context> const& ctx,
+      arangodb::velocypack::Slice info, bool needToLock);
 
-  BaseEngine(TRI_vocbase_t*, arangodb::velocypack::Slice);
+  BaseEngine(TRI_vocbase_t& vocbase, std::shared_ptr<transaction::Context> const& ctx,
+             arangodb::velocypack::Slice info, bool needToLock);
 
  public:
   virtual ~BaseEngine();
@@ -78,10 +82,11 @@ class BaseEngine {
   // The engine is NOT copyable.
   BaseEngine(BaseEngine const&) = delete;
 
-  void getVertexData(arangodb::velocypack::Slice,
-                     arangodb::velocypack::Builder&);
+  void getVertexData(arangodb::velocypack::Slice, arangodb::velocypack::Builder&);
 
   bool lockCollection(std::string const&);
+
+  Result lockAll();
 
   std::shared_ptr<transaction::Context> context() const;
 
@@ -102,18 +107,17 @@ class BaseTraverserEngine : public BaseEngine {
   // deletes an engine but the registry
   // does not get informed properly
 
-  BaseTraverserEngine(TRI_vocbase_t*, arangodb::velocypack::Slice);
+  BaseTraverserEngine(TRI_vocbase_t& vocbase,
+                      std::shared_ptr<transaction::Context> const& ctx,
+                      arangodb::velocypack::Slice info, bool needToLock);
 
   virtual ~BaseTraverserEngine();
 
-  void getEdges(arangodb::velocypack::Slice, size_t,
-                arangodb::velocypack::Builder&);
+  void getEdges(arangodb::velocypack::Slice, size_t, arangodb::velocypack::Builder&);
 
-  void getVertexData(arangodb::velocypack::Slice, size_t,
-                     arangodb::velocypack::Builder&);
+  void getVertexData(arangodb::velocypack::Slice, size_t, arangodb::velocypack::Builder&);
 
-  virtual void smartSearch(arangodb::velocypack::Slice,
-                           arangodb::velocypack::Builder&) = 0;
+  virtual void smartSearch(arangodb::velocypack::Slice, arangodb::velocypack::Builder&) = 0;
 
   virtual void smartSearchBFS(arangodb::velocypack::Slice,
                               arangodb::velocypack::Builder&) = 0;
@@ -124,7 +128,6 @@ class BaseTraverserEngine : public BaseEngine {
   std::unique_ptr<traverser::TraverserOptions> _opts;
 };
 
-
 class ShortestPathEngine : public BaseEngine {
  public:
   // Only the Registry (friend) is allowed
@@ -133,13 +136,13 @@ class ShortestPathEngine : public BaseEngine {
   // deletes an engine but the registry
   // does not get informed properly
 
-  ShortestPathEngine(TRI_vocbase_t*, arangodb::velocypack::Slice);
+  ShortestPathEngine(TRI_vocbase_t& vocbase,
+                     std::shared_ptr<transaction::Context> const& ctx,
+                     arangodb::velocypack::Slice info, bool needToLock);
 
   virtual ~ShortestPathEngine();
 
-  void getEdges(arangodb::velocypack::Slice,
-                bool backward,
-                arangodb::velocypack::Builder&);
+  void getEdges(arangodb::velocypack::Slice, bool backward, arangodb::velocypack::Builder&);
 
   EngineType getType() const override { return SHORTESTPATH; }
 
@@ -155,15 +158,14 @@ class TraverserEngine : public BaseTraverserEngine {
   // deletes an engine but the registry
   // does not get informed properly
 
-  TraverserEngine(TRI_vocbase_t*, arangodb::velocypack::Slice);
+  TraverserEngine(TRI_vocbase_t& vocbase, std::shared_ptr<transaction::Context> const& ctx,
+                  arangodb::velocypack::Slice info, bool needToLock);
 
   ~TraverserEngine();
 
-  void smartSearch(arangodb::velocypack::Slice,
-                   arangodb::velocypack::Builder&) override;
+  void smartSearch(arangodb::velocypack::Slice, arangodb::velocypack::Builder&) override;
 
-  void smartSearchBFS(arangodb::velocypack::Slice,
-                      arangodb::velocypack::Builder&) override;
+  void smartSearchBFS(arangodb::velocypack::Slice, arangodb::velocypack::Builder&) override;
 };
 
 }  // namespace traverser

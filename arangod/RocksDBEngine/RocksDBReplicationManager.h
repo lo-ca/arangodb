@@ -25,6 +25,7 @@
 
 #include "Basics/Common.h"
 #include "Basics/Mutex.h"
+#include "Replication/utilities.h"
 #include "RocksDBEngine/RocksDBReplicationContext.h"
 
 struct TRI_vocbase_t;
@@ -54,7 +55,7 @@ class RocksDBReplicationManager {
   /// there are active contexts
   //////////////////////////////////////////////////////////////////////////////
 
-  RocksDBReplicationContext* createContext(double ttl);
+  RocksDBReplicationContext* createContext(double ttl, TRI_server_id_t serverId);
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief remove a context by id
@@ -70,27 +71,20 @@ class RocksDBReplicationManager {
   /// not
   //////////////////////////////////////////////////////////////////////////////
 
-  RocksDBReplicationContext* find(
-      RocksDBReplicationId, bool& isBusy,
-      double ttl = RocksDBReplicationContext::DefaultTTL);
+  RocksDBReplicationContext* find(RocksDBReplicationId,
+                                  double ttl = replutils::BatchInfo::DefaultTimeout);
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief find an existing context by id and extend lifetime
+  /// may be used concurrently on used contextes
+  //////////////////////////////////////////////////////////////////////////////
+  int extendLifetime(RocksDBReplicationId, double ttl = replutils::BatchInfo::DefaultTimeout);
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief return a context for later use
   //////////////////////////////////////////////////////////////////////////////
 
   void release(RocksDBReplicationContext*);
-
-  //////////////////////////////////////////////////////////////////////////////
-  /// @brief return a context for garbage collection
-  //////////////////////////////////////////////////////////////////////////////
-
-  void destroy(RocksDBReplicationContext*);
-
-  //////////////////////////////////////////////////////////////////////////////
-  /// @brief whether or not the repository contains a used context
-  //////////////////////////////////////////////////////////////////////////////
-
-  bool containsUsedContext();
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief drop contexts by database (at least mark them as deleted)
@@ -109,13 +103,26 @@ class RocksDBReplicationManager {
   //////////////////////////////////////////////////////////////////////////////
 
   bool garbageCollect(bool);
-  
+
   //////////////////////////////////////////////////////////////////////////////
   /// @brief tell the replication manager that a shutdown is in progress
   /// effectively this will block the creation of new contexts
   //////////////////////////////////////////////////////////////////////////////
-    
+
   void beginShutdown();
+
+ private:
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief return a context for garbage collection
+  //////////////////////////////////////////////////////////////////////////////
+
+  void destroy(RocksDBReplicationContext*);
+
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief whether or not the repository contains a used context
+  //////////////////////////////////////////////////////////////////////////////
+
+  bool containsUsedContext();
 
  private:
   //////////////////////////////////////////////////////////////////////////////
@@ -128,9 +135,8 @@ class RocksDBReplicationManager {
   /// @brief list of current contexts
   //////////////////////////////////////////////////////////////////////////////
 
-  std::unordered_map<RocksDBReplicationId, RocksDBReplicationContext*>
-      _contexts;
-  
+  std::unordered_map<RocksDBReplicationId, RocksDBReplicationContext*> _contexts;
+
   //////////////////////////////////////////////////////////////////////////////
   /// @brief whether or not a shutdown is in progress
   //////////////////////////////////////////////////////////////////////////////
@@ -140,21 +146,20 @@ class RocksDBReplicationManager {
 
 class RocksDBReplicationContextGuard {
  public:
-  
   RocksDBReplicationContextGuard(RocksDBReplicationManager* manager,
                                  RocksDBReplicationContext* ctx)
-    : _manager(manager), _ctx(ctx) {
+      : _manager(manager), _ctx(ctx) {
     if (_ctx != nullptr) {
       TRI_ASSERT(_ctx->isUsed());
     }
   }
 
-  RocksDBReplicationContextGuard(RocksDBReplicationContextGuard&& other)
-    noexcept : _manager(other._manager), _ctx(other._ctx) {
+  RocksDBReplicationContextGuard(RocksDBReplicationContextGuard&& other) noexcept
+      : _manager(other._manager), _ctx(other._ctx) {
     other._ctx = nullptr;
-  } 
-  
-  ~RocksDBReplicationContextGuard()  {
+  }
+
+  ~RocksDBReplicationContextGuard() {
     if (_ctx != nullptr) {
       TRI_ASSERT(_ctx->isUsed());
       _manager->release(_ctx);
@@ -165,6 +170,6 @@ class RocksDBReplicationContextGuard {
   RocksDBReplicationManager* _manager;
   RocksDBReplicationContext* _ctx;
 };
-}
+}  // namespace arangodb
 
 #endif

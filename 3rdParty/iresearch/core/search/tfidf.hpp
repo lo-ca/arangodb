@@ -37,17 +37,17 @@ public:
   }
 
   // for use with irs::order::add<T>() and default args (static build)
-  DECLARE_FACTORY_DEFAULT();
+  DECLARE_FACTORY();
 
   typedef float_t score_t;
 
-  explicit tfidf_sort(bool normalize = WITH_NORMS());
+  explicit tfidf_sort(bool normalize = WITH_NORMS()) NOEXCEPT;
 
   static void init(); // for trigering registration in a static build
-  bool normalize() const { return normalize_; }
-  void normalize(bool value) { normalize_ = value; }
+  bool normalize() const NOEXCEPT { return normalize_; }
+  void normalize(bool value) NOEXCEPT { normalize_ = value; }
 
-  virtual sort::prepared::ptr prepare() const;
+  virtual sort::prepared::ptr prepare() const override;
 
 private:
   bool normalize_;

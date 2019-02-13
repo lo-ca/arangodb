@@ -24,13 +24,16 @@
 #include "Logger/Logger.h"
 #include "ProgramOptions/ProgramOptions.h"
 #include "ProgramOptions/Section.h"
+#include "RestServer/SystemDatabaseFeature.h"
 #include "Statistics/ConnectionStatistics.h"
+#include "Statistics/Descriptions.h"
 #include "Statistics/RequestStatistics.h"
 #include "Statistics/ServerStatistics.h"
 #include "Statistics/StatisticsWorker.h"
+#include "VocBase/vocbase.h"
 
-#include <thread>
 #include <chrono>
+#include <thread>
 
 using namespace arangodb;
 using namespace arangodb::application_features;
@@ -43,23 +46,32 @@ using namespace arangodb::options;
 
 namespace arangodb {
 namespace basics {
+
+Mutex TRI_RequestsStatisticsMutex;
+
+std::vector<double> const TRI_BytesReceivedDistributionVectorStatistics({250, 1000, 2000,
+                                                                         5000, 10000});
+std::vector<double> const TRI_BytesSentDistributionVectorStatistics({250, 1000, 2000,
+                                                                     5000, 10000});
+std::vector<double> const TRI_ConnectionTimeDistributionVectorStatistics({0.1, 1.0, 60.0});
+std::vector<double> const TRI_RequestTimeDistributionVectorStatistics({0.01, 0.05, 0.1,
+                                                                       0.2, 0.5, 1.0});
+
 StatisticsCounter TRI_AsyncRequestsStatistics;
 StatisticsCounter TRI_HttpConnectionsStatistics;
 StatisticsCounter TRI_TotalRequestsStatistics;
-StatisticsDistribution* TRI_BytesReceivedDistributionStatistics;
-StatisticsDistribution* TRI_BytesSentDistributionStatistics;
-StatisticsDistribution* TRI_ConnectionTimeDistributionStatistics;
-StatisticsDistribution* TRI_IoTimeDistributionStatistics;
-StatisticsDistribution* TRI_QueueTimeDistributionStatistics;
-StatisticsDistribution* TRI_RequestTimeDistributionStatistics;
-StatisticsDistribution* TRI_TotalTimeDistributionStatistics;
-StatisticsVector TRI_BytesReceivedDistributionVectorStatistics;
-StatisticsVector TRI_BytesSentDistributionVectorStatistics;
-StatisticsVector TRI_ConnectionTimeDistributionVectorStatistics;
-StatisticsVector TRI_RequestTimeDistributionVectorStatistics;
-std::vector<StatisticsCounter> TRI_MethodRequestsStatistics;
-}
-}
+std::array<StatisticsCounter, MethodRequestsStatisticsSize> TRI_MethodRequestsStatistics;
+
+StatisticsDistribution TRI_BytesReceivedDistributionStatistics(TRI_BytesReceivedDistributionVectorStatistics);
+StatisticsDistribution TRI_BytesSentDistributionStatistics(TRI_BytesSentDistributionVectorStatistics);
+StatisticsDistribution TRI_ConnectionTimeDistributionStatistics(TRI_ConnectionTimeDistributionVectorStatistics);
+StatisticsDistribution TRI_IoTimeDistributionStatistics(TRI_RequestTimeDistributionVectorStatistics);
+StatisticsDistribution TRI_QueueTimeDistributionStatistics(TRI_RequestTimeDistributionVectorStatistics);
+StatisticsDistribution TRI_RequestTimeDistributionStatistics(TRI_RequestTimeDistributionVectorStatistics);
+StatisticsDistribution TRI_TotalTimeDistributionStatistics(TRI_RequestTimeDistributionVectorStatistics);
+
+}  // namespace basics
+}  // namespace arangodb
 
 // -----------------------------------------------------------------------------
 // --SECTION--                                                  StatisticsThread
@@ -102,10 +114,6 @@ class arangodb::StatisticsThread final : public Thread {
         }
       }
     }
-
-    RequestStatistics::shutdown();
-    ConnectionStatistics::shutdown();
-    ServerStatistics::shutdown();
   }
 };
 
@@ -115,56 +123,34 @@ class arangodb::StatisticsThread final : public Thread {
 
 StatisticsFeature* StatisticsFeature::STATISTICS = nullptr;
 
-StatisticsFeature::StatisticsFeature(
-    application_features::ApplicationServer* server)
-    : ApplicationFeature(server, "Statistics"), _statistics(true) {
-  startsAfter("Logger");
-  startsAfter("Aql");
+StatisticsFeature::StatisticsFeature(application_features::ApplicationServer& server)
+    : ApplicationFeature(server, "Statistics"),
+      _statistics(true),
+      _descriptions(new stats::Descriptions()) {
+  startsAfter("AQLPhase");
+  setOptional(true);
 }
 
-void StatisticsFeature::collectOptions(
-    std::shared_ptr<ProgramOptions> options) {
+void StatisticsFeature::collectOptions(std::shared_ptr<ProgramOptions> options) {
   options->addOldOption("server.disable-statistics", "server.statistics");
 
   options->addSection("server", "Server features");
 
-  options->addHiddenOption("--server.statistics",
-                           "turn statistics gathering on or off",
-                           new BooleanParameter(&_statistics));
+  options->addOption("--server.statistics",
+                     "turn statistics gathering on or off",
+                     new BooleanParameter(&_statistics),
+                     arangodb::options::makeFlags(arangodb::options::Flags::Hidden));
+}
+
+void StatisticsFeature::validateOptions(std::shared_ptr<ProgramOptions>) {
+  if (!_statistics) {
+    // turn ourselves off
+    disable();
+  }
 }
 
 void StatisticsFeature::prepare() {
   // initialize counters for all HTTP request types
-  TRI_MethodRequestsStatistics.clear();
-
-  for (int i = 0; i < ((int)arangodb::rest::RequestType::ILLEGAL) + 1; ++i) {
-    StatisticsCounter c;
-    TRI_MethodRequestsStatistics.emplace_back(c);
-  }
-
-  TRI_ConnectionTimeDistributionVectorStatistics << (0.1) << (1.0) << (60.0);
-
-  TRI_BytesSentDistributionVectorStatistics << (250) << (1000) << (2 * 1000)
-                                            << (5 * 1000) << (10 * 1000);
-  TRI_BytesReceivedDistributionVectorStatistics << (250) << (1000) << (2 * 1000)
-                                                << (5 * 1000) << (10 * 1000);
-  TRI_RequestTimeDistributionVectorStatistics << (0.01) << (0.05) << (0.1)
-                                              << (0.2) << (0.5) << (1.0);
-
-  TRI_ConnectionTimeDistributionStatistics = new StatisticsDistribution(
-      TRI_ConnectionTimeDistributionVectorStatistics);
-  TRI_TotalTimeDistributionStatistics =
-      new StatisticsDistribution(TRI_RequestTimeDistributionVectorStatistics);
-  TRI_RequestTimeDistributionStatistics =
-      new StatisticsDistribution(TRI_RequestTimeDistributionVectorStatistics);
-  TRI_QueueTimeDistributionStatistics =
-      new StatisticsDistribution(TRI_RequestTimeDistributionVectorStatistics);
-  TRI_IoTimeDistributionStatistics =
-      new StatisticsDistribution(TRI_RequestTimeDistributionVectorStatistics);
-  TRI_BytesSentDistributionStatistics =
-      new StatisticsDistribution(TRI_BytesSentDistributionVectorStatistics);
-  TRI_BytesReceivedDistributionStatistics =
-      new StatisticsDistribution(TRI_BytesReceivedDistributionVectorStatistics);
 
   STATISTICS = this;
 
@@ -174,25 +160,44 @@ void StatisticsFeature::prepare() {
 }
 
 void StatisticsFeature::start() {
-  if (!_statistics) {
+  if (!isEnabled()) {
     return;
   }
 
+  auto* sysDbFeature =
+      arangodb::application_features::ApplicationServer::lookupFeature<arangodb::SystemDatabaseFeature>();
+
+  if (!sysDbFeature) {
+    LOG_TOPIC(FATAL, arangodb::Logger::STATISTICS)
+        << "could not find feature 'SystemDatabase'";
+    FATAL_ERROR_EXIT();
+  }
+
+  auto vocbase = sysDbFeature->use();
+
+  if (!vocbase) {
+    LOG_TOPIC(FATAL, arangodb::Logger::STATISTICS)
+        << "could not find system database";
+    FATAL_ERROR_EXIT();
+  }
+
   _statisticsThread.reset(new StatisticsThread);
-  _statisticsWorker.reset(new StatisticsWorker);
+  _statisticsWorker.reset(new StatisticsWorker(*vocbase));
 
   if (!_statisticsThread->start()) {
-    LOG_TOPIC(FATAL, arangodb::Logger::STATISTICS) << "could not start statistics thread";
+    LOG_TOPIC(FATAL, arangodb::Logger::STATISTICS)
+        << "could not start statistics thread";
     FATAL_ERROR_EXIT();
   }
 
   if (!_statisticsWorker->start()) {
-    LOG_TOPIC(FATAL, arangodb::Logger::STATISTICS) << "could not start statistics worker";
+    LOG_TOPIC(FATAL, arangodb::Logger::STATISTICS)
+        << "could not start statistics worker";
     FATAL_ERROR_EXIT();
   }
 }
 
-void StatisticsFeature::unprepare() {
+void StatisticsFeature::stop() {
   if (_statisticsThread != nullptr) {
     _statisticsThread->beginShutdown();
 
@@ -211,27 +216,6 @@ void StatisticsFeature::unprepare() {
 
   _statisticsThread.reset();
   _statisticsWorker.reset();
-
-  delete TRI_ConnectionTimeDistributionStatistics;
-  TRI_ConnectionTimeDistributionStatistics = nullptr;
-
-  delete TRI_TotalTimeDistributionStatistics;
-  TRI_TotalTimeDistributionStatistics = nullptr;
-
-  delete TRI_RequestTimeDistributionStatistics;
-  TRI_RequestTimeDistributionStatistics = nullptr;
-
-  delete TRI_QueueTimeDistributionStatistics;
-  TRI_QueueTimeDistributionStatistics = nullptr;
-
-  delete TRI_IoTimeDistributionStatistics;
-  TRI_IoTimeDistributionStatistics = nullptr;
-
-  delete TRI_BytesSentDistributionStatistics;
-  TRI_BytesSentDistributionStatistics = nullptr;
-
-  delete TRI_BytesReceivedDistributionStatistics;
-  TRI_BytesReceivedDistributionStatistics = nullptr;
 
   STATISTICS = nullptr;
 }

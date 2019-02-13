@@ -24,12 +24,13 @@
 #ifndef ARANGOD_AQL_MODIFICATION_NODES_H
 #define ARANGOD_AQL_MODIFICATION_NODES_H 1
 
-#include "Basics/Common.h"
 #include "Aql/Ast.h"
+#include "Aql/CollectionAccessingNode.h"
 #include "Aql/ExecutionNode.h"
 #include "Aql/ModificationOptions.h"
-#include "Aql/types.h"
 #include "Aql/Variable.h"
+#include "Aql/types.h"
+#include "Basics/Common.h"
 #include "VocBase/voc-types.h"
 #include "VocBase/vocbase.h"
 
@@ -40,48 +41,35 @@ class ExecutionBlock;
 class ExecutionPlan;
 
 /// @brief abstract base class for modification operations
-class ModificationNode : public ExecutionNode {
+class ModificationNode : public ExecutionNode, public CollectionAccessingNode {
   friend class ExecutionBlock;
   friend class ModificationBlock;
 
   /// @brief constructor with a vocbase and a collection and options
  protected:
-  ModificationNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
-                   Collection* collection, ModificationOptions const& options,
-                   Variable const* outVariableOld,
-                   Variable const* outVariableNew)
+  ModificationNode(ExecutionPlan* plan, size_t id, Collection const* collection,
+                   ModificationOptions const& options,
+                   Variable const* outVariableOld, Variable const* outVariableNew)
       : ExecutionNode(plan, id),
-        _vocbase(vocbase),
-        _collection(collection),
+        CollectionAccessingNode(collection),
         _options(options),
         _outVariableOld(outVariableOld),
-        _outVariableNew(outVariableNew) {
-    TRI_ASSERT(_vocbase != nullptr);
-    TRI_ASSERT(_collection != nullptr);
-  }
+        _outVariableNew(outVariableNew),
+        _countStats(true),
+        _producesResults(true) {}
 
   ModificationNode(ExecutionPlan*, arangodb::velocypack::Slice const& slice);
 
   /// @brief export to VelocyPack
-  virtual void toVelocyPackHelper(arangodb::velocypack::Builder&,
-                                  bool) const override;
+  virtual void toVelocyPackHelper(arangodb::velocypack::Builder&, unsigned flags) const override;
 
  public:
-  /// @brief return the database
-  TRI_vocbase_t* vocbase() const { return _vocbase; }
-
-  /// @brief return the collection
-  Collection* collection() const { return _collection; }
-
-  /// @brief modify collection afterwards
-  void setCollection(Collection* coll) { _collection = coll; }
-
   /// @brief estimateCost
   /// Note that all the modifying nodes use this estimateCost method which is
   /// why we can make it final here.
-  double estimateCost(size_t&) const override final;
+  CostEstimate estimateCost() const override final;
 
-  /// @brief data modification is non-deterministic  
+  /// @brief data modification is non-deterministic
   bool isDeterministic() override final { return false; }
 
   /// @brief getOptions
@@ -115,25 +103,34 @@ class ModificationNode : public ExecutionNode {
   void clearOutVariableNew() { _outVariableNew = nullptr; }
 
   /// @brief set the "$OLD" out variable
-  void setOutVariableOld(Variable const* oldVar) {
-    _outVariableOld = oldVar;
-  }
+  void setOutVariableOld(Variable const* oldVar) { _outVariableOld = oldVar; }
 
   /// @brief set the "$NEW" out variable
-  void setOutVariableNew(Variable const* newVar) {
-    _outVariableNew = newVar;
-  }
+  void setOutVariableNew(Variable const* newVar) { _outVariableNew = newVar; }
+
+  /// @brief whether or not the node produces results
+  /// this is normally turned on unless an optimizer rule
+  /// explicitly turns this off as a performance optimization
+  bool producesResults() const { return _producesResults; }
+
+  /// @brief whether or not the node produces results
+  void producesResults(bool value) { _producesResults = value; }
 
   /// @brief whether or not the node is a data modification node
   bool isModificationNode() const override { return true; }
 
+  /// @brief whether this node contributes to statistics. Only disabled in
+  /// SmartGraph case
+  bool countStats() const { return _countStats; }
+
+  /// @brief Disable that this node is contributing to statistics. Only disabled
+  /// in SmartGraph case
+  void disableStatistics() { _countStats = false; }
+
  protected:
-  /// @brief _vocbase, the database
-  TRI_vocbase_t* _vocbase;
+  void cloneCommon(ModificationNode*) const;
 
-  /// @brief collection
-  Collection* _collection;
-
+ protected:
   /// @brief modification operation options
   ModificationOptions _options;
 
@@ -142,6 +139,13 @@ class ModificationNode : public ExecutionNode {
 
   /// @brief output variable ($NEW)
   Variable const* _outVariableNew;
+
+  /// @brief whether this node contributes to statistics. Only disabled in
+  /// SmartGraph case
+  bool _countStats;
+
+  /// @brief whether this node will pass through results from block above
+  bool _producesResults;
 };
 
 /// @brief class RemoveNode
@@ -153,11 +157,10 @@ class RemoveNode : public ModificationNode {
   friend class RedundantCalculationsReplacer;
 
  public:
-  RemoveNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
-             Collection* collection, ModificationOptions const& options,
-             Variable const* inVariable, Variable const* outVariableOld)
-      : ModificationNode(plan, id, vocbase, collection, options, outVariableOld,
-                         nullptr),
+  RemoveNode(ExecutionPlan* plan, size_t id, Collection const* collection,
+             ModificationOptions const& options, Variable const* inVariable,
+             Variable const* outVariableOld)
+      : ModificationNode(plan, id, collection, options, outVariableOld, nullptr),
         _inVariable(inVariable) {
     TRI_ASSERT(_inVariable != nullptr);
   }
@@ -168,27 +171,25 @@ class RemoveNode : public ModificationNode {
   NodeType getType() const override final { return REMOVE; }
 
   /// @brief export to VelocyPack
-  void toVelocyPackHelper(arangodb::velocypack::Builder&,
-                          bool) const override final;
+  void toVelocyPackHelper(arangodb::velocypack::Builder&, unsigned flags) const override final;
+
+  /// @brief creates corresponding ExecutionBlock
+  std::unique_ptr<ExecutionBlock> createBlock(
+      ExecutionEngine& engine,
+      std::unordered_map<ExecutionNode*, ExecutionBlock*> const&) const override;
 
   /// @brief clone ExecutionNode recursively
   ExecutionNode* clone(ExecutionPlan* plan, bool withDependencies,
                        bool withProperties) const override final;
 
-  /// @brief getVariablesUsedHere, returning a vector
-  std::vector<Variable const*> getVariablesUsedHere() const override final {
-    return std::vector<Variable const*>{_inVariable};
-  }
-
   /// @brief getVariablesUsedHere, modifying the set in-place
-  void getVariablesUsedHere(
-      std::unordered_set<Variable const*>& vars) const override final {
+  void getVariablesUsedHere(arangodb::HashSet<Variable const*>& vars) const override final {
     vars.emplace(_inVariable);
   }
 
-  void setInVariable(Variable const* var) {
-    _inVariable = var;
-  }
+  void setInVariable(Variable const* var) { _inVariable = var; }
+
+  Variable const* inVariable() const { return _inVariable; }
 
  private:
   /// @brief input variable
@@ -204,11 +205,10 @@ class InsertNode : public ModificationNode {
   friend class RedundantCalculationsReplacer;
 
  public:
-  InsertNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
-             Collection* collection, ModificationOptions const& options,
-             Variable const* inVariable, Variable const* outVariableNew)
-      : ModificationNode(plan, id, vocbase, collection, options, nullptr,
-                         outVariableNew),
+  InsertNode(ExecutionPlan* plan, size_t id, Collection const* collection,
+             ModificationOptions const& options, Variable const* inVariable,
+             Variable const* outVariableOld, Variable const* outVariableNew)
+      : ModificationNode(plan, id, collection, options, outVariableOld, outVariableNew),
         _inVariable(inVariable) {
     TRI_ASSERT(_inVariable != nullptr);
     // _outVariable might be a nullptr
@@ -220,35 +220,83 @@ class InsertNode : public ModificationNode {
   NodeType getType() const override final { return INSERT; }
 
   /// @brief export to VelocyPack
-  void toVelocyPackHelper(arangodb::velocypack::Builder&,
-                          bool) const override final;
+  void toVelocyPackHelper(arangodb::velocypack::Builder&, unsigned flags) const override final;
+
+  /// @brief creates corresponding ExecutionBlock
+  std::unique_ptr<ExecutionBlock> createBlock(
+      ExecutionEngine& engine,
+      std::unordered_map<ExecutionNode*, ExecutionBlock*> const&) const override;
 
   /// @brief clone ExecutionNode recursively
   ExecutionNode* clone(ExecutionPlan* plan, bool withDependencies,
                        bool withProperties) const override final;
 
-  /// @brief getVariablesUsedHere, returning a vector
-  std::vector<Variable const*> getVariablesUsedHere() const override final {
-    return std::vector<Variable const*>{_inVariable};
-  }
-
   /// @brief getVariablesUsedHere, modifying the set in-place
-  void getVariablesUsedHere(
-      std::unordered_set<Variable const*>& vars) const override final {
+  void getVariablesUsedHere(arangodb::HashSet<Variable const*>& vars) const override final {
     vars.emplace(_inVariable);
   }
+  
+  Variable const* inVariable() const { return _inVariable; }
 
-  void setInVariable(Variable const* var) {
-    _inVariable = var;
-  }
+  void setInVariable(Variable const* var) { _inVariable = var; }
 
  private:
   /// @brief input variable
   Variable const* _inVariable;
 };
 
+class UpdateReplaceNode : public ModificationNode {
+  friend class ExecutionNode;
+  friend class ExecutionBlock;
+  friend class UpdateBlock;
+  friend class ReplaceBlock;
+  friend class UpdateReplaceBlock;
+  friend class ModificationBlock;
+  friend class RedundantCalculationsReplacer;
+
+ public:
+  UpdateReplaceNode(ExecutionPlan* plan, size_t id, Collection const* collection,
+                    ModificationOptions const& options,
+                    Variable const* inDocVariable, Variable const* inKeyVariable,
+                    Variable const* outVariableOld, Variable const* outVariableNew)
+      : ModificationNode(plan, id, collection, options, outVariableOld, outVariableNew),
+        _inDocVariable(inDocVariable),
+        _inKeyVariable(inKeyVariable) {
+    TRI_ASSERT(_inDocVariable != nullptr);
+    // _inKeyVariable might be a nullptr
+  }
+
+  UpdateReplaceNode(ExecutionPlan*, arangodb::velocypack::Slice const&);
+
+  /// @brief export to VelocyPack
+  void toVelocyPackHelper(arangodb::velocypack::Builder&, unsigned flags) const override;
+
+  /// @brief getVariablesUsedHere, modifying the set in-place
+  void getVariablesUsedHere(arangodb::HashSet<Variable const*>& vars) const override final {
+    vars.emplace(_inDocVariable);
+
+    if (_inKeyVariable != nullptr) {
+      vars.emplace(_inKeyVariable);
+    }
+  }
+
+  /// @brief set the input document variable
+  void setInDocVariable(Variable const* var) { _inDocVariable = var; }
+
+  Variable const* inKeyVariable() const { return _inKeyVariable; }
+
+  Variable const* inDocVariable() const { return _inDocVariable; }
+
+ protected:
+  /// @brief input variable for documents
+  Variable const* _inDocVariable;
+
+  /// @brief input variable for keys
+  Variable const* _inKeyVariable;
+};
+
 /// @brief class UpdateNode
-class UpdateNode : public ModificationNode {
+class UpdateNode : public UpdateReplaceNode {
   friend class ExecutionNode;
   friend class ExecutionBlock;
   friend class UpdateBlock;
@@ -257,17 +305,12 @@ class UpdateNode : public ModificationNode {
 
   /// @brief constructor with a vocbase and a collection name
  public:
-  UpdateNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
-             Collection* collection, ModificationOptions const& options,
-             Variable const* inDocVariable, Variable const* inKeyVariable,
-             Variable const* outVariableOld, Variable const* outVariableNew)
-      : ModificationNode(plan, id, vocbase, collection, options, outVariableOld,
-                         outVariableNew),
-        _inDocVariable(inDocVariable),
-        _inKeyVariable(inKeyVariable) {
-    TRI_ASSERT(_inDocVariable != nullptr);
-    // _inKeyVariable might be a nullptr
-  }
+  UpdateNode(ExecutionPlan* plan, size_t id, Collection const* collection,
+             ModificationOptions const& options, Variable const* inDocVariable,
+             Variable const* inKeyVariable, Variable const* outVariableOld,
+             Variable const* outVariableNew)
+      : UpdateReplaceNode(plan, id, collection, options, inDocVariable,
+                          inKeyVariable, outVariableOld, outVariableNew) {}
 
   UpdateNode(ExecutionPlan*, arangodb::velocypack::Slice const&);
 
@@ -275,50 +318,20 @@ class UpdateNode : public ModificationNode {
   NodeType getType() const override final { return UPDATE; }
 
   /// @brief export to VelocyPack
-  void toVelocyPackHelper(arangodb::velocypack::Builder&,
-                          bool) const override final;
+  void toVelocyPackHelper(arangodb::velocypack::Builder&, unsigned flags) const override final;
+
+  /// @brief creates corresponding ExecutionBlock
+  std::unique_ptr<ExecutionBlock> createBlock(
+      ExecutionEngine& engine,
+      std::unordered_map<ExecutionNode*, ExecutionBlock*> const&) const override;
 
   /// @brief clone ExecutionNode recursively
   ExecutionNode* clone(ExecutionPlan* plan, bool withDependencies,
                        bool withProperties) const override final;
-
-  /// @brief getVariablesUsedHere, returning a vector
-  std::vector<Variable const*> getVariablesUsedHere() const override final {
-    // Please do not change the order here without adjusting the
-    // optimizer rule distributeInCluster as well!
-    std::vector<Variable const*> v{_inDocVariable};
-
-    if (_inKeyVariable != nullptr) {
-      v.emplace_back(_inKeyVariable);
-    }
-    return v;
-  }
-
-  /// @brief getVariablesUsedHere, modifying the set in-place
-  void getVariablesUsedHere(
-      std::unordered_set<Variable const*>& vars) const override final {
-    vars.emplace(_inDocVariable);
-
-    if (_inKeyVariable != nullptr) {
-      vars.emplace(_inKeyVariable);
-    }
-  }
-
-  /// @brief set the input document variable
-  void setInDocVariable(Variable const* var) {
-    _inDocVariable = var;
-  }
-
- private:
-  /// @brief input variable for documents
-  Variable const* _inDocVariable;
-
-  /// @brief input variable for keys
-  Variable const* _inKeyVariable;
 };
 
 /// @brief class ReplaceNode
-class ReplaceNode : public ModificationNode {
+class ReplaceNode : public UpdateReplaceNode {
   friend class ExecutionNode;
   friend class ExecutionBlock;
   friend class ReplaceBlock;
@@ -327,17 +340,12 @@ class ReplaceNode : public ModificationNode {
 
   /// @brief constructor with a vocbase and a collection name
  public:
-  ReplaceNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
-              Collection* collection, ModificationOptions const& options,
-              Variable const* inDocVariable, Variable const* inKeyVariable,
-              Variable const* outVariableOld, Variable const* outVariableNew)
-      : ModificationNode(plan, id, vocbase, collection, options, outVariableOld,
-                         outVariableNew),
-        _inDocVariable(inDocVariable),
-        _inKeyVariable(inKeyVariable) {
-    TRI_ASSERT(_inDocVariable != nullptr);
-    // _inKeyVariable might be a nullptr
-  }
+  ReplaceNode(ExecutionPlan* plan, size_t id, Collection const* collection,
+              ModificationOptions const& options, Variable const* inDocVariable,
+              Variable const* inKeyVariable, Variable const* outVariableOld,
+              Variable const* outVariableNew)
+      : UpdateReplaceNode(plan, id, collection, options, inDocVariable,
+                          inKeyVariable, outVariableOld, outVariableNew) {}
 
   ReplaceNode(ExecutionPlan*, arangodb::velocypack::Slice const& base);
 
@@ -345,46 +353,16 @@ class ReplaceNode : public ModificationNode {
   NodeType getType() const override final { return REPLACE; }
 
   /// @brief export to VelocyPack
-  void toVelocyPackHelper(arangodb::velocypack::Builder&,
-                          bool) const override final;
+  void toVelocyPackHelper(arangodb::velocypack::Builder&, unsigned flags) const override final;
+
+  /// @brief creates corresponding ExecutionBlock
+  std::unique_ptr<ExecutionBlock> createBlock(
+      ExecutionEngine& engine,
+      std::unordered_map<ExecutionNode*, ExecutionBlock*> const&) const override;
 
   /// @brief clone ExecutionNode recursively
   ExecutionNode* clone(ExecutionPlan* plan, bool withDependencies,
                        bool withProperties) const override final;
-
-  /// @brief getVariablesUsedHere, returning a vector
-  std::vector<Variable const*> getVariablesUsedHere() const override final {
-    // Please do not change the order here without adjusting the
-    // optimizer rule distributeInCluster as well!
-    std::vector<Variable const*> v{_inDocVariable};
-
-    if (_inKeyVariable != nullptr) {
-      v.emplace_back(_inKeyVariable);
-    }
-    return v;
-  }
-
-  /// @brief getVariablesUsedHere, modifying the set in-place
-  void getVariablesUsedHere(
-      std::unordered_set<Variable const*>& vars) const override final {
-    vars.emplace(_inDocVariable);
-
-    if (_inKeyVariable != nullptr) {
-      vars.emplace(_inKeyVariable);
-    }
-  }
-
-  /// @brief set the input document variable
-  void setInDocVariable(Variable const* var) {
-    _inDocVariable = var;
-  }
-
- private:
-  /// @brief input variable for documents
-  Variable const* _inDocVariable;
-
-  /// @brief input variable for keys
-  Variable const* _inKeyVariable;
 };
 
 /// @brief class UpsertNode
@@ -397,13 +375,11 @@ class UpsertNode : public ModificationNode {
 
   /// @brief constructor with a vocbase and a collection name
  public:
-  UpsertNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
-             Collection* collection, ModificationOptions const& options,
-             Variable const* inDocVariable, Variable const* insertVariable,
-             Variable const* updateVariable, Variable const* outVariableNew,
-             bool isReplace)
-      : ModificationNode(plan, id, vocbase, collection, options, nullptr,
-                         outVariableNew),
+  UpsertNode(ExecutionPlan* plan, size_t id, Collection const* collection,
+             ModificationOptions const& options, Variable const* inDocVariable,
+             Variable const* insertVariable, Variable const* updateVariable,
+             Variable const* outVariableNew, bool isReplace)
+      : ModificationNode(plan, id, collection, options, nullptr, outVariableNew),
         _inDocVariable(inDocVariable),
         _insertVariable(insertVariable),
         _updateVariable(updateVariable),
@@ -421,44 +397,35 @@ class UpsertNode : public ModificationNode {
   NodeType getType() const override final { return UPSERT; }
 
   /// @brief export to VelocyPack
-  void toVelocyPackHelper(arangodb::velocypack::Builder&,
-                          bool) const override final;
+  void toVelocyPackHelper(arangodb::velocypack::Builder&, unsigned flags) const override final;
+
+  /// @brief creates corresponding ExecutionBlock
+  std::unique_ptr<ExecutionBlock> createBlock(
+      ExecutionEngine& engine,
+      std::unordered_map<ExecutionNode*, ExecutionBlock*> const&) const override;
 
   /// @brief clone ExecutionNode recursively
   ExecutionNode* clone(ExecutionPlan* plan, bool withDependencies,
                        bool withProperties) const override final;
 
-  /// @brief getVariablesUsedHere, returning a vector
-  std::vector<Variable const*> getVariablesUsedHere() const override final {
-    // Please do not change the order here without adjusting the
-    // optimizer rule distributeInCluster as well!
-    return std::vector<Variable const*>(
-        {_inDocVariable, _insertVariable, _updateVariable});
-  }
-
   /// @brief getVariablesUsedHere, modifying the set in-place
-  void getVariablesUsedHere(
-      std::unordered_set<Variable const*>& vars) const override final {
+  void getVariablesUsedHere(arangodb::HashSet<Variable const*>& vars) const override final {
     vars.emplace(_inDocVariable);
     vars.emplace(_insertVariable);
     vars.emplace(_updateVariable);
   }
 
-  void setInDocVariable(Variable const* var) {
-    _inDocVariable = var;
-  }
+  Variable const* inDocVariable() const { return _inDocVariable; }
 
-  void setInsertVariable(Variable const* var) {
-    _insertVariable = var;
-  }
+  void setInDocVariable(Variable const* var) { _inDocVariable = var; }
+  
+  Variable const* insertVariable() const { return _insertVariable; }
 
-  void setUpdateVariable(Variable const* var) {
-    _updateVariable = var;
-  }
+  void setInsertVariable(Variable const* var) { _insertVariable = var; }
 
-  void setIsReplace(bool var) {
-    _isReplace = var;
-  }
+  void setUpdateVariable(Variable const* var) { _updateVariable = var; }
+
+  void setIsReplace(bool var) { _isReplace = var; }
 
  private:
   /// @brief input variable for the search document
@@ -474,7 +441,7 @@ class UpsertNode : public ModificationNode {
   bool _isReplace;
 };
 
-}  // namespace arangodb::aql
+}  // namespace aql
 }  // namespace arangodb
 
 #endif

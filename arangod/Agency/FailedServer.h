@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2014-2016 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2014-2018 ArangoDB GmbH, Cologne, Germany
 /// Copyright 2004-2014 triAGENS GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,8 +35,8 @@ struct FailedServer : public Job {
                std::string const& creator = std::string(),
                std::string const& failed = std::string());
 
-  FailedServer(Node const& snapshot, AgentInterface* agent,
-               JOB_STATUS status, std::string const& jobId);
+  FailedServer(Node const& snapshot, AgentInterface* agent, JOB_STATUS status,
+               std::string const& jobId);
 
   virtual ~FailedServer();
 
@@ -48,7 +48,7 @@ struct FailedServer : public Job {
 
   std::string _server;
 };
-}
-}
+}  // namespace consensus
+}  // namespace arangodb
 
 #endif

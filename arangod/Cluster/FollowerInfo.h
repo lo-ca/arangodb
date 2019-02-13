@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2014-2016 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2014-2018 ArangoDB GmbH, Cologne, Germany
 /// Copyright 2004-2014 triAGENS GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,27 +29,27 @@
 
 namespace arangodb {
 
-  ////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
 /// @brief a class to track followers that are in sync for a shard
 ////////////////////////////////////////////////////////////////////////////////
 
 class FollowerInfo {
   std::shared_ptr<std::vector<ServerID> const> _followers;
-  Mutex                                        _mutex;
-  arangodb::LogicalCollection*                 _docColl;
-  std::string                                  _theLeader;
-     // if the latter is empty, the we are leading
+  mutable Mutex _mutex;
+  arangodb::LogicalCollection* _docColl;
+  std::string _theLeader;
+  // if the latter is empty, then we are leading
+  bool _theLeaderTouched;
 
  public:
-
   explicit FollowerInfo(arangodb::LogicalCollection* d)
-    : _followers(new std::vector<ServerID>()), _docColl(d) { }
+      : _followers(new std::vector<ServerID>()), _docColl(d), _theLeaderTouched(false) {}
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief get information about current followers of a shard.
   //////////////////////////////////////////////////////////////////////////////
 
-  std::shared_ptr<std::vector<ServerID> const> get();
+  std::shared_ptr<std::vector<ServerID> const> get() const;
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief add a follower to a shard, this is only done by the server side
@@ -83,19 +83,27 @@ class FollowerInfo {
   void setTheLeader(std::string const& who) {
     MUTEX_LOCKER(locker, _mutex);
     _theLeader = who;
+    _theLeaderTouched = true;
   }
 
   //////////////////////////////////////////////////////////////////////////////
   /// @brief get the leader
   //////////////////////////////////////////////////////////////////////////////
 
-  std::string getLeader() {
+  std::string getLeader() const {
     MUTEX_LOCKER(locker, _mutex);
     return _theLeader;
   }
 
+  //////////////////////////////////////////////////////////////////////////////
+  /// @brief see if leader was explicitly set
+  //////////////////////////////////////////////////////////////////////////////
+
+  bool getLeaderTouched() const {
+    MUTEX_LOCKER(locker, _mutex);
+    return _theLeaderTouched;
+  }
 };
 }  // end namespace arangodb
 
 #endif
-#define ARANGOD_CLUSTER_CLUSTER_INFO_H 1

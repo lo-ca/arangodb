@@ -2,8 +2,16 @@
 ArangoDB Maintainers manual
 ===========================
 
-This file contains documentation about the build process, documentation generation means, unittests - put short - if you want to hack parts of arangod this could be interesting for you.
+This file contains documentation about the build process and unittests - put short - if you want to hack parts of arangod this could be interesting for you.
+Documentation readme can be found in directory [Documentation](https://github.com/arangodb/arangodb/blob/devel/Documentation/README_maintainers.md).
 
+GIT
+===
+Setting up git for automatically merging certain automatically generated files in the arangodb source tree:
+
+    git config --global merge.ours.driver true
+
+    
 CMake
 =====
 
@@ -31,7 +39,23 @@ CMake flags
  * *-DUSE_FAILURE_TESTS=1* - adds javascript hook to crash the server for data integrity tests
  * *-DUSE_CATCH_TESTS=On (default is On so this is set unless you explicitly disable it)
 
-If you have made changes to errors.dat, remember to use the -DUSE_MAINTAINER_MODE flag.
+Errors in ArangoDB
+------------------
+
+If one changes any error in the ArangoDB system, then one has to:
+
+ 1. Only touch `lib/Basics/errors.dat` and not the files which are
+    automatically generated from it (`lib/Basics/voc-errors.h`,
+    `lib/Basics/voc-errors.cpp` and `js/common/bootstrap/errors.js`)
+ 2. Always do a full build with `USE_MAINTAINER_MODE` switched ON
+    afterwards, *before* you commit the change.
+ 3. A `make arangod` is not enough! Since it will not recreate these
+    files!
+
+*Reason*: These files are only built in maintainer mode, we want that a
+build in non-maintainer-mode works from every commit.
+If you only change the generated files, the next build with maintainer
+mode will delete your changes.
 
 CFLAGS
 ------
@@ -88,7 +112,7 @@ A sample version to help working with the arangod rescue console may look like t
     };
     print = internal.print;
 
-HINT: You shouldn't lean on these variables in your foxx services.
+HINT: You shouldn't lean on these variables in your Foxx services.
 ______________________________________________________________________________________________________
 
 JSLint
@@ -131,6 +155,22 @@ Dependencies
   `cd UnitTests/HttpInterface; bundler`
 * catch (compile time, shipped in the 3rdParty directory)
 
+Invoking
+--------
+Since several testing technoligies are utilized, and different arangodb startup options may be required 
+(even different compilation options may be required) the framework is split into testsuites. 
+Get a list of the available testsuites and options by invoking: 
+
+    ./scripts/unittest
+
+To locate the suite(s) associated with a specific test file use: 
+
+    ./scripts/unittest find --test js/common/tests/shell/shell-aqlfunctions.js
+
+or to run all of them: 
+
+    ./scripts/unittest auto --test js/common/tests/shell/shell-aqlfunctions.js
+
 
 Filename conventions
 ====================
@@ -169,22 +209,29 @@ These tests are ran using the jasmine framework instead of jsunity.
 --------
 These tests produce a certain thread on infrastructure or the test system, and therefore should only be executed once per day.
 
+-grey
+-----
+These tests are currently listed as "grey", which means that they are
+known to be unstable or broken. These tests will not be executed by the
+testing framework if the option `--skipGrey` is given. See
+`tests/Greylist.txt` for up-to-date information about greylisted tests.
+Please help to keep this file up to date.
+
 Test frameworks used
 ====================
 There are several major places where unittests live: 
  - *UnitTests/HttpInterface*        - rspec tests
  - tests/*                          - catch unittests
- - *js/server/tests*                - runneable on the server
- - *js/common/tests*                - runneable on the server & via arangosh
+ - *js/server/tests*                - runnable on the server
+ - *js/common/tests*                - runnable on the server & via arangosh
  - *js/common/test-data*
- - *js/client/tests*                - runneable via arangosh
+ - *js/client/tests*                - runnable via arangosh
  - *js/apps/system/aardvark/test*
 
 
 Debugging Tests (quick intro)
 -----------------------------
-
-runnuing single rspec test
+running single rspec test
 
    ./scripts/unittest http_server --test api-import-spec.rb
 
@@ -254,6 +301,9 @@ arangosh is similar, however, you can only run tests which are intended to be ra
 mocha tests
 -----------
 All tests with -spec in their names are using the [mochajs.org](https://mochajs.org) framework.
+To run those tests, e.g. in the arangosh, use this:
+`const runTest = require("@arangodb/mocha-runner");`
+`runTest(<filepath>, true)`
 
 Javascript framework
 --------------------
@@ -275,8 +325,8 @@ _________________
 The first parameter chooses the facility to execute.
 Available choices include:
  - *all*:                (calls multiple) This target is utilized by most of the jenkins builds invoking unit tests.
- - *single_client*:      (see Running a single unittestsuite)
- - *single_server*:      (see Running a single unittestsuite)
+ - *single_client*:      (see Running a single unittest suite)
+ - *single_server*:      (see Running a single unittest suite)
  - many more -           call without arguments for more details.
 
 Passing Options
@@ -294,6 +344,8 @@ syntax --option value --sub:option value. Using Valgrind could look like this:
       --extraArgs:scheduler.threads 1 \
       --extraArgs:javascript.gc-frequency 1000000 \
       --extraArgs:javascript.gc-interval 65536 \
+      --extraArgs:log.level debug \
+      --extraArgs:log.force-direct true \
       --javascript.v8-contexts 2 \
       --valgrind /usr/bin/valgrind \
       --valgrindargs:log-file /tmp/valgrindlog.%p
@@ -302,12 +354,28 @@ syntax --option value --sub:option value. Using Valgrind could look like this:
  - we specify some arangod arguments via --extraArgs which increase the server performance
  - we specify to run using valgrind (this is supported by all facilities)
  - we specify some valgrind commandline arguments
+ - we set the log level to debug
+ - we force the logging not to happen asynchronous
+ - eventually you may still add temporary `console.log()` statements to tests you debug.
 
-Running a single unittestsuite
+Debugging AQL execution blocks
 ------------------------------
+To debug AQL execution blocks, two steps are required:
+
+- turn on logging for queries using `--extraArgs:log.level queries=info`
+- send queries enabling block debugging: `db._query('RETURN 1', {}, { profile: 4 })`
+
+you now will get log-entries with the contents being passed between the blocks.
+
+Running a single unittest suite
+-------------------------------
 Testing a single test with the framework directly on a server:
 
     scripts/unittest single_server --test js/server/tests/aql/aql-escaping.js
+
+You can also only execute a single test case in a jsunity test suite (in this case `testTokens`):
+
+    scripts/unittest single_server --test js/server/tests/aql/aql-escaping.js --testCase testTokens
 
 Testing a single test with the framework via arangosh:
 
@@ -317,10 +385,14 @@ Testing a single rspec test:
 
     scripts/unittest http_server --test api-users-spec.rb
 
+Running a test against a ready started server (in contrast to starting one by itself):
+
+    scripts/unittest http_server --test api-batch-spec.rb --server tcp://127.0.0.1:8529 --serverRoot /tmp/123
+
 **scripts/unittest** is mostly only a wrapper; The backend functionality lives in:
 **js/client/modules/@arangodb/testing.js**
 
-Running foxx tests with a fake foxx Repo
+Running Foxx tests with a fake Foxx Repo
 ----------------------------------------
 Since downloading fox apps from github can be cumbersome with shaky DSL
 and DOS'ed github, we can fake it like this:
@@ -332,6 +404,10 @@ arangod Emergency console
 -------------------------
 
     require("jsunity").runTest("js/server/tests/aql/aql-escaping.js");
+
+Filtering for one test case (in this case `testTokens`):
+
+    require("jsunity").runTest("js/server/tests/aql/aql-escaping.js", false, "testTokens");
 
 arangosh client
 ---------------
@@ -385,7 +461,7 @@ The non permanent way of doing this in a running system is:
 
 (you may also inspect these files to validate the current settings)
 
-More modern systems facilitate [`systemd-coredump`](https://www.freedesktop.org/software/systemd/man/systemd-coredump.html) (via a similar named package) to controll coredumps.
+More modern systems facilitate [`systemd-coredump`](https://www.freedesktop.org/software/systemd/man/systemd-coredump.html) (via a similar named package) to control coredumps.
 On most systems it will put compressed coredumps to `/var/lib/systemd/coredump`. 
 
 In order to use automatic coredump analysis with the unittests you need to configure 
@@ -394,10 +470,48 @@ In order to use automatic coredump analysis with the unittests you need to confi
 Please note that we can't support [Ubuntu Apport](https://wiki.ubuntu.com/Apport).
 Please use `apport-unpack` to send us the bare coredumps.
 
-Solaris Coredumps
-=================
-Solaris configures the system corefile behaviour via the `coreadm` programm.
-see https://docs.oracle.com/cd/E19455-01/805-7229/6j6q8svhr/ for more details.
+In order to get coredumps from binaries changing their UID the system needs to be told that its allowed to write cores from them.
+Default ArangoDB installations will do exactly that, so the following is neccessary to make the system produce coredumps from
+production arangodb instances:
+
+Edit `/etc/security/limits.conf` to contain:
+```
+arangodb        -       core            infinity
+```
+
+Edit the systemd unit file `/lib/systemd/system/arangodb3.service` (USE infinity!!!):
+
+```
+## setting for core files
+# Any dir that is writable by the user running arangod
+WorkingDirectory=/var/lib/arangodb3
+# core limit - set this to infinity to enable cores
+LimitCORE=0
+```
+
+enable new systemd settings:
+`systemctl daemon-reload &&  systemctl restart arangodb3.service`
+
+enable suid process dumping:
+`echo 1 >/proc/sys/fs/suid_dumpable`
+
+make the above change permanent:
+
+`echo "sys.fs.suid_dumpable = 1" >> /etc/sysctl.d/99-suid-coredump.conf` 
+
+You can also generate coredumps from running processes without killing them by using gdb:
+
+    # sleep 100000 & 
+    [2] 6942
+    # gdb /bin/sleep 6942 
+    ...
+    0x00007faaa7abd4e4 in __GI___nanosleep (requested_time=0x7ffd047c9940, remaining=0x0) at ../sysdeps/unix/sysv/linux/nanosleep.c:28
+    gdb> gcore 
+    Saved corefile core.6942
+    gdb> quit
+    Detaching from program: /bin/sleep, process 6942
+    # ls -l core*
+    -rw-r--r--  1 me users  352664 Nov 27 10:48  core.6942
 
 Analyzing Coredumps on Linux
 ============================
@@ -432,20 +546,20 @@ It will keep on running and monitor arangod until eventually a crash happens. Yo
 Debugging symbols
 -----------------
 Releases are supported by a public symbol server so you will be able to debug cores.
-Releases starting with **2.5.6, 2.6.3** onwards are supported; Note that you should run the latest version of a release series before reporting bugs.
+Please replace XX with the Major & Minor release number. Note that you should run the latest version of a release series before reporting bugs.
 Either [WinDbg](http://go.microsoft.com/fwlink/p/?linkid=84137) or Visual studio support setting the symbol path
-via the environment variable or in the menu. Given we want to store the symbols on *e:\symbol_cach* we add the arangodb symbolserver like this:
+via the environment variable or in the menu. Given we want to store the symbols on *e:\symbol_cache* we add the arangodb symbolserver like this:
 
-    set _NT_SYMBOL_PATH=cache*e:\symbol_cache\cache;srv*e:\symbol_cache\arango*https://www.arangodb.com/repositories/symsrv/;SRV*e:\symbol_cache\ms*http://msdl.microsoft.com/download/symbols
+    set _NT_SYMBOL_PATH=SRV*e:\symbol_cache\arango*https://download.arangodb.com/symsrv_arangodbXX/;SRV*e:\symbol_cache\ms*http://msdl.microsoft.com/download/symbols
 
 You then will be able to see stack traces in the debugger.
 
 You may also try to download the symbols manually using: 
 
-    symchk.exe arangod.exe /s SRV*e:/symbol_cache/cache*https://www.arangodb.com/repositories/symsrv/
+    symchk.exe arangod.exe /s SRV*e:/symbol_cache/cache*https://download.arangodb.com/symsrv_arangodbXX/
 
 
-The symbolserver over at https://www.arangodb.com/repositories/symsrv/ is browseable; thus you can easily download the files you need by hand. It contains of a list of directories corosponding to the components of arangodb:
+The symbolserver over at https://download.arangodb.com/symsrv_arangodbXX/ is browseable; thus you can easily download the files you need by hand. It contains of a list of directories corresponding to the components of arangodb:
 
   - arango - the basic arangodb library needed by all components
   - arango_v8 - the basic V8 wrappers needed by all components
@@ -459,14 +573,13 @@ The symbolserver over at https://www.arangodb.com/repositories/symsrv/ is browse
     - arangosh
     - arangovpack
 
-In these directories you will find subdirectories with the hash corosponding to the id of the binaries. Their date should corrospond to the release date of their respective arango release. 
+In these directories you will find subdirectories with the hash corresponding to the id of the binaries. Their date should corrospond to the release date of their respective arango release. 
 
 This means i.e. for ArangoDB 3.1.11: 
 
- https://www.arangodb.com/repositories/symsrv/arangod.pdb/A8B899D2EDFC40E994C30C32FCE5FB346/arangod.pd_
+ https://download.arangodb.com/symsrv_arangodb31/arangod.pdb/A8B899D2EDFC40E994C30C32FCE5FB346/arangod.pd_
 
-This file is a microsoft cabinet file, which is a little bit compressed. You can dismantle it so the windows explorer offers you its proper handler by renaming it to .cab; click on the now named `arangod.cab`, copy the contained arangod.pdb into your symbol path.
-
+This file is a microsoft cabinet file, which is a little bit compressed. You can extract it by invoking `cabextract` or dismantle it so the windows explorer offers you its proper handler by renaming it to .cab; click on the now named `arangod.cab`, copy the contained arangod.pdb into your symbol path.
 
 Coredump analysis
 -----------------
@@ -484,309 +597,14 @@ These commands for `-c` mean:
 
 If you don't specify them via -c you can also use them in an interactive manner.
 
-______________________________________________________________________________________________________
+Alternatively you can also directly specify the symbol path via the `-y` parameter (replace XX):
 
-Documentation
-=============
-Using Docker container
-----------------------
-We provide the docker container `arangodb/documentation-builder` which brings all neccessary dependencies to build the documentation.
+    cdb -z <dump file> -y 'SRV*e:\symbol_cache*https://download.arangodb.com/symsrv_arangodbXX;SRV*e:\symbol_cache\ms*http://msdl.microsoft'
 
-You can automagically build it using
-
-    ./scripts/generateDocumentation.sh
-
-which will start the docker container, compile ArangoDB, generate fresh example snippets, generate swagger, and all gitbook
-produced output files.
-
-You can also use `proselint` inside of that container to let it proof read your english ;-)
-
-
-Installing on local system
---------------------------
-Dependencies to build documentation:
-
-- [swagger 2](http://swagger.io/) for the API-Documentation inside aardvark (no installation required)
-
-- [Node.js](https://nodejs.org/)
-
-    Make sure the option to *Add to PATH* is enabled.
-    After installation, the following commands should be available everywhere:
-
-    - `node`
-    - `npm`
-
-    If not, add the installation path to your environment variable PATH.
-    Gitbook requires more recent node versions.
-
-- [Gitbook](https://github.com/GitbookIO/gitbook)
-
-    Can be installed with Node's package manager NPM:
-
-        npm install gitbook-cli -g
-
-- [ditaa (DIagrams Through Ascii Art)](http://ditaa.sourceforge.net/) to build the 
-  ascii art diagrams (optional)
-
-- Calibre2 (optional, only required if you want to build the e-book version)
-
-  http://calibre-ebook.com/download
-
-  Run the installer and follow the instructions.
-
-Generate users documentation
-============================
-If you've edited examples, see below how to regenerate them with `./utils/generateExamples.sh`.
-If you've edited REST (AKA HTTP) documentation, first invoke `./utils/generateSwagger.sh`.
-Run `cd Documentation/Books && ./build.sh` to generate it.
-The documentation will be generated in subfolders in `arangodb/Documentation/Books/books` -
-use your favorite browser to read it.
-
-You may encounter permission problems with gitbook and its npm invocations.
-In that case, you need to run the command as root / Administrator.
-
-If you see "device busy" errors on Windows, retry. Make sure you don't have
-intermediate files open in the ppbooks / books subfolder (i.e. browser or editor).
-It can also temporarily occur during phases of high HDD / SSD load.
-
-The build-scripts contain several sanity checks, i.e. whether all examples are
-used, and no dead references are there. (see building examples in that case below)
-
-If the markdown files aren't converted to html, or `index.html` shows a single
-chapter only (content of `README.md`), make sure
-[Cygwin create native symlinks](https://docs.arangodb.com/cookbook/CompilingUnderWindows.html)
-It does not, if `SUMMARY.md` in `Books/ppbooks/` looks like this:
-
-    !<symlink>ÿþf o o
-
-If sub-chapters do not show in the navigation, try another browser (Firefox).
-Chrome's security policies are pretty strict about localhost and file://
-protocol. You may access the docs through a local web server to lift the
-restrictions. You can use pythons build in http server for this.
-
-    ~/books$ python -m SimpleHTTPServer 8000
-
-To only regereneate one file (faster) you may specify a filter:
-
-    make build-book NAME=Manual FILTER=Manual/Aql/Invoke.md
-
-(regular expressions allowed)
-
-Using Gitbook
-=============
-
-The `arangodb/Documentation/Books/build.sh` script generates a website
-version of the manual.
-
-If you want to generate all media ala PDF, ePUB, run `arangodb/Documentation/books/build.sh  build-dist-books` (takes some time to complete).
-
-If you want to generate only one of them, run below 
-build commands in `arangodb/Documentation/Books/books/[Manual|HTTP|AQL]/`. Calibre's
-`ebook-convert` will be used for the conversion.
-
-Generate a PDF:
-
-    gitbook pdf ./ppbooks/Manual ./target/path/filename.pdf
-
-Generate an ePub:
-
-    gitbook epub ./ppbooks/Manual ./target/path/filename.epub
-
-Examples
-========
-Where to add new...
--------------------
- - Documentation/DocuBlocks/* - markdown comments with execution section
- - Documentation/Books/Manual/SUMMARY.md - index of all sub documentations
-
-generate
---------
- - `./utils/generateExamples.sh --onlyThisOne geoIndexSelect` will only produce one example - *geoIndexSelect*
- - `./utils/generateExamples.sh --onlyThisOne 'MOD.*'` will only produce the examples matching that regex; Note that
-   examples with enumerations in their name may base on others in their series - so you should generate the whole group.
- - running `onlyThisOne` in conjunction with a pre-started server cuts down the execution time even more.
-   In addition to the `--onlyThisOne ...` specify i.e. `--server.endpoint tcp://127.0.0.1:8529` to utilize your already running arangod.
-   Please note that examples may collide with existing collections like 'test' - you need to make sure your server is clean enough.
- - you can use generateExamples like that:
-    `./utils/generateExamples.sh \
-       --server.endpoint 'tcp://127.0.0.1:8529' \
-       --withPython C:/tools/python2/python.exe \
-       --onlyThisOne 'MOD.*'`
- - `./Documentation/Scripts/allExamples.sh` generates a file where you can inspect all examples for readability.
- - `./utils/generateSwagger.sh` - on top level to generate the documentation interactively with the server; you may use
-    [the swagger editor](https://github.com/swagger-api/swagger-editor) to revalidate whether
-    *js/apps/system/_admin/aardvark/APP/api-docs.json* is accurate.
- - `cd Documentation/Books; make` - to generate the HTML documentation
-
-
-write markdown
---------------
-*md* files are used for the structure. To join it with parts extracted from the program documentation
-you need to place hooks:
-  - `@startDocuBlock <tdocuBlockName>` is replaced by a Docublock extracted from source.
-  - `@startDocuBlockInline <docuBlockName>` till `@endDocuBlock <docuBlockName>`
-     is replaced in with its own evaluated content - so  *@EXAMPLE_ARANGOSH_[OUTPUT | RUN]* sections are executed
-     the same way as inside of source code documentation.
-
-Include ditaa diagrams
-----------------------
-We use the [beautifull ditaa (DIagrams Through Ascii Art)](http://ditaa.sourceforge.net/) to generate diagrams explaining flows etc.
-in our documentation.
-
-We have i.e. `Manual/Graphs/graph_user_in_group.ditaa` which is transpiled by ditaa into a png file, thus you simply include
-a png file of the same name as image into the mardown: `![User in group example](graph_user_in_group.png)` to reference it.
-
-Read / use the documentation
-----------------------------
- - `file:///Documentation/Books/books/Manual/index.html` contains the generated manual
- - JS-Console - Tools/API - Interactive swagger documentation which you can play with.
-
-arangod Example tool
-====================
-`./utils/generateExamples.sh` picks examples from the code documentation, executes them, and creates a transcript including their results.
-
-Here is how its details work:
-  - all *Documentation/DocuBlocks/*.md* and *Documentation/Books/*.md* are searched.
-  - all lines inside of source code starting with '///' are matched, all lines in .md files.
-  - an example start is marked with *@EXAMPLE_ARANGOSH_OUTPUT* or *@EXAMPLE_ARANGOSH_RUN*
-  - the example is named by the string provided in brackets after the above key
-  - the output is written to `Documentation/Examples/<name>.generated`
-  - examples end with *@END_EXAMPLE_[OUTPUT|RUN]*
-  - all code in between is executed as javascript in the **arangosh** while talking to a valid **arangod**.
-  You may inspect the generated js code in `/tmp/arangosh.examples.js`
-
-OUTPUT and RUN specifics
----------------------------
-By default, Examples should be self contained and thus not depend on each other. They should clean up the collections they create.
-Building will fail if resources aren't cleaned.
-However, if you intend a set of OUTPUT and RUN to demonstrate interactively and share generated *ids*, you have to use an alphabetical
-sortable naming scheme so they're executed in sequence. Using `<modulename>_<sequencenumber>[a|b|c|d]_thisDoesThat` seems to be a good scheme.
-
-  - OUTPUT is intended to create samples that the users can cut'n'paste into their arangosh. Its used for javascript api documentation.
-    * wrapped lines:
-      Lines starting with a pipe (`/// |`) are joined together with the next following line.
-      You have to use this if you want to execute loops, functions or commands which shouldn't be torn apart by the framework.
-    * Lines starting with *var*:
-      The command behaves similar to the arangosh: the server reply won't be printed.
-      However, the variable will be in the scope of the other lines - else it won't.
-    * Lines starting with a Tilde (`/// ~`):
-      These lines can be used for setup/teardown purposes. They are completely invisible in the generated example transcript.
-    * `~removeIgnoreCollection("test")` - the collection test may live across several tests.
-    * `~addIgnoreCollection("test")` - the collection test will again be alarmed if left over.
-
-  - it is executed line by line. If a line is intended to fail (aka throw an exception),
-    you have to specify `// xpError(ERROR_ARANGO_DOCUMENT_KEY_UNEXPECTED)` so the exception will be caught;
-    else the example is marked as broken.
-    If you need to wrap that line, you may want to make the next line starting by a tilde to suppress an empty line:
-
-        /// | someLongStatement()
-        /// ~ // xpError(ERROR_ARANGO_DOCUMENT_KEY_UNEXPECTED)
-
- - RUN is intended to be pasted into a unix shell with *cURL* to demonstrate how the REST-HTTP-APIs work.
-   The whole chunk of code is executed at once, and is expected **not to throw**.
-   You should use **assert(condition)** to ensure the result is what you've expected.
-   The *body* can be a string, or a javascript object which is then represented in JSON format.
-
-    * Send the HTTP-request: `var response = logCurlRequest('POST', url, body);`
-    * check its response:    `assert(response.code === 200);`
-    * output a JSON server Reply: `logJsonResponse(response);` (will fail if its not a valid json)
-    * output HTML to the user: `logHtmlResponse(response);` (i.e. redirects have HTML documents)
-    * output the plain text to dump to the user: `logRawResponse(response);`
-    * dump the reply to the errorlog for testing (will mark run as failed): `logErrorResponse(response);`
-
-
-Swagger integration
-===================
-`./utils/generateSwagger.sh` scans the documentation, and generates swagger output.
-It scans for all documentationblocks containing `@RESTHEADER`.
-It is a prerequisite for integrating these blocks into the gitbook documentation.
-
-Tokens may have curly brackets with comma separated fields. They may optionally be followed by subsequent text
-lines with a long descriptions.
-
-Sections group a set of tokens; they don't have parameters.
-
-**Types**
-Swagger has several native types referenced below:
-*[integer|long|float|double|string|byte|binary|boolean|date|dateTime|password]* -
-[see the swagger documentation](https://github.com/swagger-api/swagger-spec/blob/master/versions/2.0.md#data-types)
-
-It consists of several sections which in term have sub-parameters:
-
-**Supported Sections:**
-
-RESTQUERYPARAMETERS
--------------------
-Parameters to be appended to the URL in form of ?foo=bar
-add *RESTQUERYPARAM*s below
-
-RESTURLPARAMETERS
------------------
-Section of parameters placed in the URL in curly brackets, add *RESTURLPARAM*s below.
-
-RESTDESCRIPTION
----------------
-Long text describing this route.
-
-RESTRETURNCODES
----------------
-should consist of several *RESTRETURNCODE* tokens.
-
-**Supported Tokens:**
-
-RESTREPLYBODY
--------------
-Similar  to RESTBODYPARAM - just what the server will reply with.
-
-RESTHEADER
-----------
-Up to 2 parameters.
-* *[GET|POST|PUT|DELETE] <url>* url should start with a */*, it may contain parameters in curly brackets, that
-  have to be documented in subsequent *RESTURLPARAM* tokens in the *RESTURLPARAMETERS* section.
-
-
-RESTURLPARAM
-------------
-Consists of 3 values separated by ',':
-Attributes:
-  - *name*: name of the parameter
-  - *type*:
-  - *[required|optionas]* Optional is not supported anymore. Split the docublock into one with and one without.
-
-Folowed by a long description.
-
-RESTALLBODYPARAM
-----------------
-This API has a schemaless json body (in doubt just plain ascii)
-
-RESTBODYPARAM
--------------
-Attributes:
-  - name - the name of the parameter
-  - type - the swaggertype of the parameter
-  - required/optional - whether the user can omit this parameter
-  - subtype / format (can be empty)
-    - subtype: if type is object or array, this references the enclosed variables.
-               can be either a swaggertype, or a *RESTRUCT*
-    - format: if type is a native swagger type, some support a format to specify them
-
-RESTSTRUCT
-----------
-Groups a set of attributes under the `structure name` to an object that can be referenced
-in other *RESTSTRUCT*s or *RESTBODYPARAM* attributes of type array or object
-
-Attributes:
-  - name - the name of the parameter
-  - structure name - the **type** under which this structure can be reached (should be uniq!)
-  - type - the swaggertype of the parameter (or another *RESTSTRUCT*...)
-  - required/optional - whether the user can omit this parameter
-  - subtype / format (can be empty)
-    - subtype: if type is object or array, this references the enclosed variables.
-               can be either a swaggertype, or a *RESTRUCT*
-    - format: if type is a native swagger type, some support a format to specify them
-
+and use the commands above to obtain stacktraces.
 
 --------------------------------------------------------------------------------
+
 Local cluster startup
 =====================
 

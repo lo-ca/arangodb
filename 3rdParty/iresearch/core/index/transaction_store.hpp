@@ -40,9 +40,9 @@ class transaction_store; // forward declaration
 ////////////////////////////////////////////////////////////////////////////////
 class IRESEARCH_API store_reader final
     : public sub_reader,
-      private atomic_base<std::shared_ptr<sub_reader>> {
+      private atomic_shared_ptr_helper<const sub_reader> {
  public:
-  typedef atomic_base<std::shared_ptr<sub_reader>> atomic_utils;
+  typedef atomic_shared_ptr_helper<const sub_reader> atomic_utils;
   typedef store_reader element_type; // type same as self
   typedef store_reader ptr; // pointer to self
 
@@ -56,10 +56,6 @@ class IRESEARCH_API store_reader final
   const store_reader& operator*() const NOEXCEPT { return *this; }
   store_reader* operator->() NOEXCEPT { return this; }
   const store_reader* operator->() const NOEXCEPT { return this; }
-
-  virtual index_reader::reader_iterator begin() const override {
-    return impl_->begin();
-  }
 
   virtual const column_meta* column(const string_ref& name) const override {
     return impl_->column(name);
@@ -75,17 +71,9 @@ class IRESEARCH_API store_reader final
     return impl_->column_reader(field);
   }
 
-  virtual index_reader::reader_iterator end() const override {
-    return impl_->end();
-  }
-
   virtual uint64_t docs_count() const override { return impl_->docs_count(); }
 
-  virtual uint64_t docs_count(const string_ref& field) const override {
-    return impl_->docs_count(field);
-  }
-
-  virtual docs_iterator_t::ptr docs_iterator() const override {
+  virtual doc_iterator::ptr docs_iterator() const override {
     return impl_->docs_iterator();
   }
 
@@ -108,11 +96,15 @@ class IRESEARCH_API store_reader final
 
   void reset() NOEXCEPT { impl_.reset(); }
 
+  virtual const sub_reader& operator[](size_t i) const override {
+    return (*impl_)[i];
+  }
+
   virtual size_t size() const override { return impl_->size(); }
 
  private:
   friend transaction_store; // for access to the private constructor
-  typedef std::shared_ptr<sub_reader> impl_ptr;
+  typedef std::shared_ptr<const sub_reader> impl_ptr;
 
   IRESEARCH_API_PRIVATE_VARIABLES_BEGIN
   impl_ptr impl_;
@@ -135,19 +127,19 @@ class IRESEARCH_API transaction_store: private util::noncopyable {
   // 'make(...)' method wrapper for irs::bstring for use with object pools
   struct IRESEARCH_API bstring_builder {
     typedef std::shared_ptr<irs::bstring> ptr;
-    DECLARE_FACTORY_DEFAULT();
+    DECLARE_FACTORY();
   };
 
   // 'make(...)' method wrapper for irs::column_meta for use with object pools
   struct column_meta_builder {
     typedef std::shared_ptr<irs::column_meta> ptr;
-    DECLARE_FACTORY_DEFAULT();
+    DECLARE_FACTORY();
   };
 
   // 'make(...)' method wrapper for irs::field_meta for use with object pools
   struct field_meta_builder {
     typedef std::shared_ptr<irs::field_meta> ptr;
-    DECLARE_FACTORY_DEFAULT();
+    DECLARE_FACTORY();
   };
 
   struct document_t {
@@ -249,7 +241,7 @@ class IRESEARCH_API transaction_store: private util::noncopyable {
     const column_meta_builder::ptr meta_;
     column_named_t(
         column_meta_pool_t& pool, const string_ref& name, field_id id
-    ): meta_(pool.emplace()) {
+    ): meta_(pool.emplace().release()) {
       if (meta_) {
         *meta_ = column_meta(name, id); // reset value
       }
@@ -262,7 +254,7 @@ class IRESEARCH_API transaction_store: private util::noncopyable {
     const bstring_builder::ptr name_;
     postings_t(
         bstring_pool_t& pool, const bytes_ref& name
-    ): name_(pool.emplace()) {
+    ): name_(pool.emplace().release()) {
       if (name_) {
         *name_ = name; // reset value
       }
@@ -276,7 +268,7 @@ class IRESEARCH_API transaction_store: private util::noncopyable {
     std::unordered_map<hashed_bytes_ref, postings_t> terms_;
     terms_t(
         field_meta_pool_t& pool, const string_ref& name, const flags& features
-    ): meta_(pool.emplace()) {
+    ): meta_(pool.emplace().release()) {
       if (meta_) {
         *meta_ = field_meta(name, features); // reset value
       }
@@ -497,81 +489,50 @@ class IRESEARCH_API store_writer final: private util::noncopyable {
   /// @param func the insertion logic
   /// @return all fields/attributes successfully insterted
   ////////////////////////////////////////////////////////////////////////////
-  template<typename Func>
-  bool update(const irs::filter& filter, Func func) {
+  template<typename Filter, typename Func>
+  bool update(Filter&& filter, Func func) {
     bitvector doc_ids;
 
     if (!insert(doc_ids, func)) {
       return false;
     }
 
-    remove(filter);
-    modification_queries_.back().documents_ = std::move(doc_ids); // noexcept
-
-    return true;
-  }
-
-  ////////////////////////////////////////////////////////////////////////////
-  /// @brief replaces documents matching filter with the document
-  ///        to be filled by the specified functor
-  /// @note that changes are not visible until commit()
-  /// @param filter the document filter
-  /// @param func the insertion logic
-  /// @return all fields/attributes successfully insterted
-  ////////////////////////////////////////////////////////////////////////////
-  template<typename Func>
-  bool update(irs::filter::ptr&& filter, Func func) {
-    bitvector doc_ids;
-
-    if (!insert(doc_ids, func)) {
-      return false;
-    }
-
-    remove(std::move(filter));
-    modification_queries_.back().documents_ = std::move(doc_ids); // noexcept
-
-    return true;
-  }
-
-  ////////////////////////////////////////////////////////////////////////////
-  /// @brief replaces documents matching filter with the document
-  ///        to be filled by the specified functor
-  /// @note that changes are not visible until commit()
-  /// @param filter the document filter
-  /// @param func the insertion logic
-  /// @return all fields/attributes successfully insterted
-  ////////////////////////////////////////////////////////////////////////////
-  template<typename Func>
-  bool update(const std::shared_ptr<irs::filter>& filter, Func func) {
-    bitvector doc_ids;
-
-    if (!insert(doc_ids, func)) {
-      return false;
-    }
-
-    remove(filter);
+    remove(std::forward<Filter>(filter));
     modification_queries_.back().documents_ = std::move(doc_ids); // noexcept
 
     return true;
   }
 
  private:
-  // a bstring implementation of data_output
-  class IRESEARCH_API bstring_output final: public data_output {
-   public:
-    bstring_output(bstring& buf): buf_(buf), pos_(0) {}
-    bstring_output(bstring& buf, size_t pos): buf_(buf), pos_(pos) {}
-    bstring& operator*() NOEXCEPT { return buf_; }
-    bstring* operator->() NOEXCEPT { return &buf_; }
-    byte_type* operator[](size_t offset) { return &buf_[offset]; }
+  // a data_output implementation backed by an output_iterator
+  struct bstring_data_output: public data_output {
+    bstring_output& out_;
+    bstring_data_output(bstring_output& out): out_(out) {}
     virtual void close() override {}
-    virtual size_t file_pointer() const NOEXCEPT { return pos_; }
-    void seek(size_t pos) NOEXCEPT { pos_ = pos; }
     virtual void write_byte(byte_type b) override { write_bytes(&b, 1); }
-    virtual void write_bytes(const byte_type* b, size_t size) override;
+    virtual void write_bytes(const byte_type* b, size_t size) override {
+      out_.write(b, size);
+    }
+  };
+
+  // an output_iterator implementation backed by a bstring
+  class IRESEARCH_API bstring_output
+    : std::iterator<std::output_iterator_tag, byte_type, void, void, void> {
+   public:
+    bstring_output(bstring& buf): buf_(buf), pos_(0) { ensure(pos_); }
+    bstring::value_type& operator[](size_t i) { ensure(i); return buf_[i]; }
+    bstring::value_type& operator*() { return buf_[pos_]; }
+    bstring_output& operator++() { ensure(++pos_); return *this; }
+    bstring_output& operator+=(size_t i) { ensure(pos_ += i); return *this; }
+    size_t file_pointer() const NOEXCEPT { return pos_; }
+    void seek(size_t pos) NOEXCEPT { pos_ = pos; }
+    void write(const byte_type* value, size_t size);
+
    private:
     bstring& buf_;
     size_t pos_;
+
+    void ensure(size_t pos);
   };
 
   struct modification_context {
@@ -605,7 +566,7 @@ class IRESEARCH_API store_writer final: private util::noncopyable {
   template<typename Func>
   bool insert(bitvector& doc_ids, Func func) {
     REGISTER_TIMER_DETAILED();
-    auto state_buf = store_.bstring_pool_.emplace();
+    auto state_buf = store_.bstring_pool_.emplace().release();
 
     if (!state_buf) {
       return false; // treat as a rollback
@@ -626,7 +587,7 @@ class IRESEARCH_API store_writer final: private util::noncopyable {
       transaction_store::document_t doc(next_doc_id_);
 
       ++next_doc_id_; // prepare for next document
-      doc.buf_ = store_.bstring_pool_.emplace();
+      doc.buf_ = store_.bstring_pool_.emplace().release();
 
       if (!doc.buf_) {
         return false; // treat as a rollback
@@ -635,7 +596,7 @@ class IRESEARCH_API store_writer final: private util::noncopyable {
       bstring_output out(*(doc.buf_));
       document doc_wrapper(*this, doc, out, doc_state);
 
-      doc_wrapper.out_.write_byte(0); // reserved for internal use (force all offsets to not be 0)
+      irs::write<uint8_t>(doc_wrapper.out_, 0); // reserved for internal use (force all offsets to not be 0)
       has_next = func(doc_wrapper);
 
       if (!doc_wrapper.valid()) {
@@ -692,8 +653,9 @@ class IRESEARCH_API store_writer final: private util::noncopyable {
     auto& tokens = static_cast<token_stream&>(field.get_tokens());
     const auto& features = static_cast<const flags&>(field.features());
     auto start = out.file_pointer();
+    bstring_data_output field_out(out);
 
-    if (field.write(out)
+    if (field.write(field_out)
         && store(out, state, name, doc, start)
         && index(out, state, name, features, doc, tokens)) {
       return true;
@@ -717,11 +679,12 @@ class IRESEARCH_API store_writer final: private util::noncopyable {
       static_cast<const string_ref&>(field.name()),
       std::hash<string_ref>()
     );
-
     assert(doc.buf_);
     auto start = out.file_pointer();
+    bstring_data_output field_out(out);
 
-    if (field.write(out) && store(out, state, name, doc, start)) {
+    if (field.write(field_out)
+        && store(out, state, name, doc, start)) {
       return true;
     }
 

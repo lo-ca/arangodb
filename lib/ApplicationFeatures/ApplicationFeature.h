@@ -39,11 +39,10 @@ class ApplicationFeature {
   ApplicationFeature(ApplicationFeature const&) = delete;
   ApplicationFeature& operator=(ApplicationFeature const&) = delete;
 
-  ApplicationFeature(ApplicationServer*, std::string const&);
+  ApplicationFeature(ApplicationServer& server, std::string const& name);
 
   virtual ~ApplicationFeature();
 
- public:
   // return the feature's name
   std::string const& name() const { return _name; }
 
@@ -69,9 +68,9 @@ class ApplicationFeature {
   // enable or disable a feature
   void setEnabled(bool value) {
     if (!value && !isOptional()) {
-      THROW_ARANGO_EXCEPTION_MESSAGE(
-          TRI_ERROR_BAD_PARAMETER,
-          "cannot disable non-optional feature '" + name() + "'");
+      THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_BAD_PARAMETER,
+                                     "cannot disable non-optional feature '" +
+                                         name() + "'");
     }
     _enabled = value;
   }
@@ -91,7 +90,7 @@ class ApplicationFeature {
 
   // whether the feature starts before another
   bool doesStartBefore(std::string const& other) const;
-  
+
   // whether the feature starts after another
   bool doesStartAfter(std::string const& other) const {
     return !doesStartBefore(other);
@@ -103,8 +102,7 @@ class ApplicationFeature {
 
   // load options from somewhere. this method will only be called for enabled
   // features
-  virtual void loadOptions(std::shared_ptr<options::ProgramOptions>,
-                           char const* binaryPath);
+  virtual void loadOptions(std::shared_ptr<options::ProgramOptions>, char const* binaryPath);
 
   // validate the feature's options. this method will only be called for active
   // features, after the ApplicationServer has determined which features should
@@ -133,7 +131,7 @@ class ApplicationFeature {
 
   // shut down the feature
   virtual void unprepare();
-  
+
   // return startup dependencies for feature
   std::unordered_set<std::string> const& startsAfter() const {
     return _startsAfter;
@@ -146,7 +144,7 @@ class ApplicationFeature {
 
  protected:
   // return the ApplicationServer instance
-  ApplicationServer* server() const { return _server; }
+  ApplicationServer* server() const { return &_server; }
 
   void setOptional() { setOptional(true); }
 
@@ -161,12 +159,14 @@ class ApplicationFeature {
 
   // register a start dependency upon another feature
   void startsBefore(std::string const& other) { _startsBefore.emplace(other); }
-  
+
   // determine all direct and indirect ancestors of a feature
   std::unordered_set<std::string> ancestors() const;
 
-  void onlyEnabledWith(std::string const& other) { _onlyEnabledWith.emplace(other); }
-  
+  void onlyEnabledWith(std::string const& other) {
+    _onlyEnabledWith.emplace(other);
+  }
+
   // return the list of other features that this feature depends on
   std::unordered_set<std::string> const& onlyEnabledWith() const {
     return _onlyEnabledWith;
@@ -175,16 +175,13 @@ class ApplicationFeature {
  private:
   // set a feature's state. this method should be called by the
   // application server only
-  void state(ApplicationServer::FeatureState state) {
-    _state = state;
-  }
+  void state(ApplicationServer::FeatureState state) { _state = state; }
 
   // determine all direct and indirect ancestors of a feature
   void determineAncestors();
 
- private:
   // pointer to application server
-  ApplicationServer* _server;
+  ApplicationServer& _server;
 
   // name of feature
   std::string const _name;
@@ -201,7 +198,7 @@ class ApplicationFeature {
 
   // list of direct and indirect ancestors of the feature
   std::unordered_set<std::string> _ancestors;
-  
+
   // enable this feature only if the following other features are enabled
   std::unordered_set<std::string> _onlyEnabledWith;
 
@@ -219,7 +216,8 @@ class ApplicationFeature {
 
   bool _ancestorsDetermined;
 };
-}
-}
+
+}  // namespace application_features
+}  // namespace arangodb
 
 #endif

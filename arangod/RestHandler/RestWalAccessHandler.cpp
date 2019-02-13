@@ -26,6 +26,7 @@
 #include "Basics/VPackStringBufferAdapter.h"
 #include "Basics/VelocyPackHelper.h"
 #include "Replication/common-defines.h"
+#include "Replication/utilities.h"
 #include "Rest/HttpResponse.h"
 #include "Rest/Version.h"
 #include "RestServer/DatabaseFeature.h"
@@ -46,12 +47,11 @@ using namespace arangodb::basics;
 using namespace arangodb::rest;
 
 struct MyTypeHandler final : public VPackCustomTypeHandler {
-  explicit MyTypeHandler(TRI_vocbase_t* vocbase) : resolver(vocbase) {}
+  explicit MyTypeHandler(TRI_vocbase_t& vocbase) : resolver(vocbase) {}
 
   ~MyTypeHandler() {}
 
-  void dump(VPackSlice const& value, VPackDumper* dumper,
-            VPackSlice const& base) override final {
+  void dump(VPackSlice const& value, VPackDumper* dumper, VPackSlice const& base) override final {
     dumper->appendString(toString(value, nullptr, base));
   }
 
@@ -63,49 +63,57 @@ struct MyTypeHandler final : public VPackCustomTypeHandler {
   CollectionNameResolver resolver;
 };
 
-RestWalAccessHandler::RestWalAccessHandler(GeneralRequest* request,
-                                           GeneralResponse* response)
+RestWalAccessHandler::RestWalAccessHandler(GeneralRequest* request, GeneralResponse* response)
     : RestVocbaseBaseHandler(request, response) {}
 
 bool RestWalAccessHandler::parseFilter(WalAccess::Filter& filter) {
-  bool found = false;
-  std::string const& value1 = _request->value("global", found);
-  if (found && StringUtils::boolean(value1)) {
-    if (!_vocbase->isSystem()) {
+  // determine start and end tick
+  filter.tickStart = _request->parsedValue<uint64_t>("from", filter.tickStart);
+  filter.tickLastScanned =
+      _request->parsedValue<uint64_t>("lastScanned", filter.tickLastScanned);
+
+  // determine end tick for dump
+  filter.tickEnd = _request->parsedValue("to", filter.tickEnd);
+  if (filter.tickStart > filter.tickEnd || filter.tickEnd == 0) {
+    generateError(rest::ResponseCode::BAD, TRI_ERROR_HTTP_BAD_PARAMETER,
+                  "invalid from/to values");
+    return false;
+  }
+
+  bool global = _request->parsedValue("global", false);
+  if (global) {
+    if (!_vocbase.isSystem()) {
       generateError(
           rest::ResponseCode::FORBIDDEN, TRI_ERROR_FORBIDDEN,
           "global tailing is only possible from within _system database");
       return false;
     }
   } else {
-    // filter for collection
-    filter.vocbase = _vocbase->id();
+    // filter for database
+    filter.vocbase = _vocbase.id();
 
     // extract collection
+    bool found = false;
     std::string const& value2 = _request->value("collection", found);
     if (found) {
-      LogicalCollection* c = _vocbase->lookupCollection(value2);
+      auto c = _vocbase.lookupCollection(value2);
+
       if (c == nullptr) {
-        generateError(rest::ResponseCode::NOT_FOUND,
-                      TRI_ERROR_ARANGO_COLLECTION_NOT_FOUND);
+        generateError(rest::ResponseCode::NOT_FOUND, TRI_ERROR_ARANGO_DATA_SOURCE_NOT_FOUND);
         return false;
       }
-      filter.collection = c->cid();
+
+      // filter for collection
+      filter.collection = c->id();
     }
   }
 
-  std::string const& value3 = _request->value("includeSystem", found);
-  if (found) {
-    filter.includeSystem = StringUtils::boolean(value3);
-  }
+  filter.includeSystem = _request->parsedValue("includeSystem", filter.includeSystem);
 
   // grab list of transactions from the body value
   if (_request->requestType() == arangodb::rest::RequestType::PUT) {
-    std::string const& value4 = _request->value("firstRegularTick", found);
-    if (found) {
-      filter.firstRegularTick =
-          static_cast<TRI_voc_tick_t>(StringUtils::uint64(value4));
-    }
+    filter.firstRegularTick =
+        _request->parsedValue<uint64_t>("firstRegularTick", 0);
 
     // copy default options
     VPackOptions options = VPackOptions::Defaults;
@@ -138,8 +146,13 @@ bool RestWalAccessHandler::parseFilter(WalAccess::Filter& filter) {
 }
 
 RestStatus RestWalAccessHandler::execute() {
-  if (ExecContext::CURRENT == nullptr ||
-      !ExecContext::CURRENT->isAdminUser()) {
+  if (ServerState::instance()->isCoordinator()) {
+    generateError(rest::ResponseCode::NOT_IMPLEMENTED, TRI_ERROR_CLUSTER_UNSUPPORTED,
+                  "'/_api/wal' is not yet supported in a cluster");
+    return RestStatus::DONE;
+  }
+
+  if (ExecContext::CURRENT == nullptr || !ExecContext::CURRENT->isAdminUser()) {
     generateError(ResponseCode::FORBIDDEN, TRI_ERROR_FORBIDDEN);
     return RestStatus::DONE;
   }
@@ -158,12 +171,10 @@ RestStatus RestWalAccessHandler::execute() {
 
   if (suffixes[0] == "range" && _request->requestType() == RequestType::GET) {
     handleCommandTickRange(wal);
-  } else if (suffixes[0] == "lastTick" &&
-             _request->requestType() == RequestType::GET) {
+  } else if (suffixes[0] == "lastTick" && _request->requestType() == RequestType::GET) {
     handleCommandLastTick(wal);
-  } else if (suffixes[0] == "tail" &&
-             (_request->requestType() == RequestType::GET ||
-              _request->requestType() == RequestType::PUT)) {
+  } else if (suffixes[0] == "tail" && (_request->requestType() == RequestType::GET ||
+                                       _request->requestType() == RequestType::PUT)) {
     handleCommandTail(wal);
   } else if (suffixes[0] == "open-transactions" &&
              _request->requestType() == RequestType::GET) {
@@ -191,8 +202,7 @@ void RestWalAccessHandler::handleCommandTickRange(WalAccess const* wal) {
     {  // "server" part
       VPackObjectBuilder server(&result, "server", true);
       server->add("version", VPackValue(ARANGODB_VERSION));
-      server->add("serverId",
-                  VPackValue(std::to_string(ServerIdFeature::getId())));
+      server->add("serverId", VPackValue(std::to_string(ServerIdFeature::getId())));
     }
     result.close();
     generateResult(rest::ResponseCode::OK, result.slice());
@@ -210,8 +220,7 @@ void RestWalAccessHandler::handleCommandLastTick(WalAccess const* wal) {
   {  // "server" part
     VPackObjectBuilder server(&result, "server", true);
     server->add("version", VPackValue(ARANGODB_VERSION));
-    server->add("serverId",
-                VPackValue(std::to_string(ServerIdFeature::getId())));
+    server->add("serverId", VPackValue(std::to_string(ServerIdFeature::getId())));
   }
   result.close();
   generateResult(rest::ResponseCode::OK, result.slice());
@@ -223,73 +232,56 @@ void RestWalAccessHandler::handleCommandTail(WalAccess const* wal) {
     useVst = true;
   }
 
-  // determine start and end tick
-  TRI_voc_tick_t tickStart = 0;
-  TRI_voc_tick_t tickEnd = UINT64_MAX;
-
-  bool found;
-  std::string const& value1 = _request->value("from", found);
-
-  if (found) {
-    tickStart = static_cast<TRI_voc_tick_t>(StringUtils::uint64(value1));
-  }
-
-  // determine end tick for dump
-  std::string const& value2 = _request->value("to", found);
-  if (found) {
-    tickEnd = static_cast<TRI_voc_tick_t>(StringUtils::uint64(value2));
-  }
-
-  if (found && (tickStart > tickEnd || tickEnd == 0)) {
-    generateError(rest::ResponseCode::BAD, TRI_ERROR_HTTP_BAD_PARAMETER,
-                  "invalid from/to values");
-    return;
-  }
-
   WalAccess::Filter filter;
   if (!parseFilter(filter)) {
     return;
   }
 
-  size_t chunkSize = 1024 * 1024;  
+  // check for serverId
+  TRI_server_id_t serverId =
+      _request->parsedValue("serverId", static_cast<TRI_server_id_t>(0));
+  // check if a barrier id was specified in request
+  TRI_voc_tid_t barrierId =
+      _request->parsedValue("barrier", static_cast<TRI_voc_tid_t>(0));
+
+  grantTemporaryRights();
+
+  bool found = false;
+  size_t chunkSize = 1024 * 1024;
   std::string const& value5 = _request->value("chunkSize", found);
   if (found) {
     chunkSize = static_cast<size_t>(StringUtils::uint64(value5));
     chunkSize = std::min((size_t)128 * 1024 * 1024, chunkSize);
   }
-  
-  // check if a barrier id was specified in request
-  TRI_voc_tid_t barrierId = 0;
-  std::string const& value3 = _request->value("barrier", found);
-  
-  if (found) {
-    barrierId = static_cast<TRI_voc_tick_t>(StringUtils::uint64(value3));
-  }
 
   WalAccessResult result;
-  std::map<TRI_voc_tick_t, MyTypeHandler> handlers;
+  std::map<TRI_voc_tick_t, std::unique_ptr<MyTypeHandler>> handlers;
   VPackOptions opts = VPackOptions::Defaults;
-  auto prepOpts = [&handlers, &opts](TRI_vocbase_t* vocbase) {
-    auto const& it = handlers.find(vocbase->id());
+  auto prepOpts = [&handlers, &opts](TRI_vocbase_t& vocbase) -> void {
+    auto const& it = handlers.find(vocbase.id());
+
     if (it == handlers.end()) {
-      auto const& res = handlers.emplace(vocbase->id(), MyTypeHandler(vocbase));
-      opts.customTypeHandler = &(res.first->second);
+      auto res = handlers.emplace(vocbase.id(), std::make_unique<MyTypeHandler>(vocbase));
+
+      opts.customTypeHandler = res.first->second.get();
     } else {
-      opts.customTypeHandler = &(it->second);
+      opts.customTypeHandler = it->second.get();
     }
   };
 
   size_t length = 0;
+
   if (useVst) {
-    result =
-        wal->tail(tickStart, tickEnd, chunkSize, barrierId, filter,
-                  [&](TRI_vocbase_t* vocbase, VPackSlice const& marker) {
-                    length++;
-                    if (vocbase != nullptr) {  // database drop has no vocbase
-                      prepOpts(vocbase);
-                    }
-                    _response->addPayload(marker, &opts, true);
-                  });
+    result = wal->tail(filter, chunkSize, barrierId,
+                       [&](TRI_vocbase_t* vocbase, VPackSlice const& marker) {
+                         length++;
+
+                         if (vocbase != nullptr) {  // database drop has no vocbase
+                           prepOpts(*vocbase);
+                         }
+
+                         _response->addPayload(marker, &opts, true);
+                       });
   } else {
     HttpResponse* httpResponse = dynamic_cast<HttpResponse*>(_response.get());
     TRI_ASSERT(httpResponse);
@@ -301,17 +293,19 @@ void RestWalAccessHandler::handleCommandTail(WalAccess const* wal) {
     basics::VPackStringBufferAdapter adapter(buffer.stringBuffer());
     // note: we need the CustomTypeHandler here
     VPackDumper dumper(&adapter, &opts);
-    result =
-        wal->tail(tickStart, tickEnd, chunkSize, barrierId, filter,
-                  [&](TRI_vocbase_t* vocbase, VPackSlice const& marker) {
-                    length++;
-                    if (vocbase != nullptr) {  // database drop has no vocbase
-                      prepOpts(vocbase);
-                    }
-                    dumper.dump(marker);
-                    buffer.appendChar('\n');
-                    //LOG_TOPIC(INFO, Logger::FIXME) << marker.toJson(&opts);
-                  });
+    result = wal->tail(filter, chunkSize, barrierId,
+                       [&](TRI_vocbase_t* vocbase, VPackSlice const& marker) {
+                         length++;
+
+                         if (vocbase != nullptr) {  // database drop has no vocbase
+                           prepOpts(*vocbase);
+                         }
+
+                         dumper.dump(marker);
+                         buffer.appendChar('\n');
+                         // LOG_TOPIC(INFO, Logger::REPLICATION) <<
+                         // marker.toJson(&opts);
+                       });
   }
 
   if (result.fail()) {
@@ -327,39 +321,34 @@ void RestWalAccessHandler::handleCommandTail(WalAccess const* wal) {
                    result.lastIncludedTick() < result.latestTick();
   _response->setHeaderNC(StaticStrings::ReplicationHeaderCheckMore,
                          checkMore ? "true" : "false");
-  _response->setHeaderNC(
-      StaticStrings::ReplicationHeaderLastIncluded,
-      StringUtils::itoa(result.lastIncludedTick()));
+  _response->setHeaderNC(StaticStrings::ReplicationHeaderLastIncluded,
+                         StringUtils::itoa(result.lastIncludedTick()));
+  _response->setHeaderNC(StaticStrings::ReplicationHeaderLastScanned,
+                         StringUtils::itoa(result.lastScannedTick()));
   _response->setHeaderNC(StaticStrings::ReplicationHeaderLastTick,
                          StringUtils::itoa(result.latestTick()));
-  _response->setHeaderNC(StaticStrings::ReplicationHeaderActive, "true");
   _response->setHeaderNC(StaticStrings::ReplicationHeaderFromPresent,
                          result.fromTickIncluded() ? "true" : "false");
 
   if (length > 0) {
     _response->setResponseCode(rest::ResponseCode::OK);
-    // add client
-    bool found;
-    std::string const& value = _request->value("serverId", found);
-
-    TRI_server_id_t serverId = 0;
-    if (found) {
-      serverId = static_cast<TRI_server_id_t>(StringUtils::uint64(value));
-    }
-    DatabaseFeature::DATABASE->enumerateDatabases([&](TRI_vocbase_t* vocbase) {
-      vocbase->updateReplicationClient(serverId, result.lastIncludedTick());
-    });
-    LOG_TOPIC(DEBUG, Logger::REPLICATION) << "Wal tailing after " << tickStart
-    << ", lastIncludedTick " << result.lastIncludedTick()
-    << ", fromTickIncluded " << result.fromTickIncluded();
+    LOG_TOPIC(DEBUG, Logger::REPLICATION)
+        << "WAL tailing after " << filter.tickStart << ", lastIncludedTick "
+        << result.lastIncludedTick() << ", fromTickIncluded "
+        << result.fromTickIncluded();
   } else {
-    LOG_TOPIC(DEBUG, Logger::REPLICATION) << "No more data in WAL after " << tickStart;
+    LOG_TOPIC(DEBUG, Logger::REPLICATION)
+        << "No more data in WAL after " << filter.tickStart;
     _response->setResponseCode(rest::ResponseCode::NO_CONTENT);
   }
+
+  DatabaseFeature::DATABASE->enumerateDatabases([&](TRI_vocbase_t& vocbase) -> void {
+    vocbase.updateReplicationClient(serverId, filter.tickStart,
+                                    replutils::BatchInfo::DefaultTimeout);
+  });
 }
 
-void RestWalAccessHandler::handleCommandDetermineOpenTransactions(
-    WalAccess const* wal) {
+void RestWalAccessHandler::handleCommandDetermineOpenTransactions(WalAccess const* wal) {
   // determine start and end tick
 
   std::pair<TRI_voc_tick_t, TRI_voc_tick_t> minMax;
@@ -387,6 +376,8 @@ void RestWalAccessHandler::handleCommandDetermineOpenTransactions(
 
   // check whether a database was specified
   WalAccess::Filter filter;
+  filter.tickStart = minMax.first;
+  filter.tickEnd = minMax.second;
   if (!parseFilter(filter)) {
     return;
   }
@@ -395,10 +386,9 @@ void RestWalAccessHandler::handleCommandDetermineOpenTransactions(
   VPackBuilder builder(buffer);
   builder.openArray();
   WalAccessResult r =
-      wal->openTransactions(minMax.first, minMax.second, filter,
-                            [&](TRI_voc_tick_t tick, TRI_voc_tid_t tid) {
-                              builder.add(VPackValue(std::to_string(tid)));
-                            });
+      wal->openTransactions(filter, [&](TRI_voc_tick_t tick, TRI_voc_tid_t tid) {
+        builder.add(VPackValue(std::to_string(tid)));
+      });
   builder.close();
 
   _response->setContentType(rest::ContentType::DUMP);
@@ -412,5 +402,18 @@ void RestWalAccessHandler::handleCommandDetermineOpenTransactions(
                            r.fromTickIncluded() ? "true" : "false");
     _response->setHeaderNC(StaticStrings::ReplicationHeaderLastIncluded,
                            StringUtils::itoa(r.lastIncludedTick()));
+  }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+/// @brief Grant temporary restore rights
+//////////////////////////////////////////////////////////////////////////////
+void RestWalAccessHandler::grantTemporaryRights() {
+  if (ExecContext::CURRENT != nullptr) {
+    if (ExecContext::CURRENT->databaseAuthLevel() == auth::Level::RW) {
+      // If you have administrative access on this database,
+      // we grant you everything for restore.
+      ExecContext::CURRENT = nullptr;
+    }
   }
 }

@@ -1,9 +1,10 @@
-Features and Improvements
-=========================
+Features and Improvements in ArangoDB 2.6
+=========================================
 
 The following list shows in detail which features have been added or improved in
 ArangoDB 2.6. ArangoDB 2.6 also contains several bugfixes that are not listed
-here. For a list of bugfixes, please consult the [CHANGELOG](https://github.com/arangodb/arangodb/blob/devel/CHANGELOG).
+here. For a list of bugfixes, please consult the
+[CHANGELOG](https://github.com/arangodb/arangodb/blob/devel/CHANGELOG).
 
 APIs added
 ----------
@@ -12,16 +13,16 @@ APIs added
 
 The following commands have been added for `collection` objects:
 
-* collection.lookupByKeys(keys)
-* collection.removeByKeys(keys)
+* `collection.lookupByKeys(keys)`
+* `collection.removeByKeys(keys)`
 
 These commands can be used to perform multi-document lookup and removal operations efficiently
 from the ArangoShell. The argument to these operations is an array of document keys.
 
 These commands can also be used via the HTTP REST API. Their endpoints are:
 
-* PUT /\_api/simple/lookup-by-keys
-* PUT /\_api/simple/remove-by-keys
+* `PUT /_api/simple/lookup-by-keys`
+* `PUT /_api/simple/remove-by-keys`
 
 ### Collection export HTTP REST API
 
@@ -174,7 +175,7 @@ RETURN { found: OLD, updated: NEW }
 A more detailed description of `UPSERT` can be found here:
 http://jsteemann.github.io/blog/2015/03/27/preview-of-the-upsert-command/
 
-### Miscellaneous changes
+### Miscellaneous AQL changes
 
 When errors occur inside AQL user functions, the error message will now contain a stacktrace,
 indicating the line of code in which the error occurred. This should make debugging AQL user functions
@@ -212,7 +213,7 @@ You can now write tests for your Foxx apps using the Mocha testing framework:
 https://www.arangodb.com/2015/04/testing-foxx-mocha/
 
 A recipe for writing tests for your Foxx apps can be found in the cookbook:
-https://docs.arangodb.com/2.8/cookbook/FoxxTesting.html
+https://docs.arangodb.com/2.8/Cookbook/FoxxTesting.html
 
 ### API Documentation
 

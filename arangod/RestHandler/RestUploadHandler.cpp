@@ -23,9 +23,9 @@
 
 #include "RestUploadHandler.h"
 #include "Basics/FileUtils.h"
-#include "Basics/files.h"
 #include "Basics/StaticStrings.h"
 #include "Basics/StringUtils.h"
+#include "Basics/files.h"
 #include "Basics/tri-strings.h"
 #include "GeneralServer/GeneralServer.h"
 #include "Logger/Logger.h"
@@ -35,26 +35,16 @@ using namespace arangodb;
 using namespace arangodb::basics;
 using namespace arangodb::rest;
 
-RestUploadHandler::RestUploadHandler(GeneralRequest* request,
-                                     GeneralResponse* response)
+RestUploadHandler::RestUploadHandler(GeneralRequest* request, GeneralResponse* response)
     : RestVocbaseBaseHandler(request, response) {}
 
 RestUploadHandler::~RestUploadHandler() {}
 
 RestStatus RestUploadHandler::execute() {
-  // cast is ok because http request is required
-  HttpRequest* request = dynamic_cast<HttpRequest*>(_request.get());
-
-  if (request == nullptr) {
-    THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_INTERNAL, "invalid request type");
-  }
-
   // extract the request type
-  auto const type = request->requestType();
-
+  auto const type = _request->requestType();
   if (type != rest::RequestType::POST) {
-    generateError(rest::ResponseCode::METHOD_NOT_ALLOWED,
-                  TRI_ERROR_HTTP_METHOD_NOT_ALLOWED);
+    generateError(rest::ResponseCode::METHOD_NOT_ALLOWED, TRI_ERROR_HTTP_METHOD_NOT_ALLOWED);
 
     return RestStatus::DONE;
   }
@@ -64,12 +54,10 @@ RestStatus RestUploadHandler::execute() {
     std::string errorMessage;
     long systemError;
 
-    if (TRI_GetTempName("uploads", filename, false, systemError, errorMessage) !=
-        TRI_ERROR_NO_ERROR) {
+    if (TRI_GetTempName("uploads", filename, false, systemError, errorMessage) != TRI_ERROR_NO_ERROR) {
       errorMessage = "could not generate temp file: " + errorMessage;
-      generateError(rest::ResponseCode::SERVER_ERROR,
-                    TRI_ERROR_INTERNAL, errorMessage);
-      return RestStatus::FAIL;
+      generateError(rest::ResponseCode::SERVER_ERROR, TRI_ERROR_INTERNAL, errorMessage);
+      return RestStatus::DONE;
     }
   }
 
@@ -85,24 +73,25 @@ RestStatus RestUploadHandler::execute() {
     TRI_FreeString(relative);
   }
 
-  std::string const& bodyStr = request->body();
-  char const* body = bodyStr.c_str();
+  StringRef bodyStr = _request->rawPayload();
+  char const* body = bodyStr.data();
   size_t bodySize = bodyStr.size();
 
-  LOG_TOPIC(TRACE, arangodb::Logger::FIXME) << "saving uploaded file of length " << bodySize << " in file '"
-             << filename << "', relative '" << relativeString << "'";
+  LOG_TOPIC(TRACE, arangodb::Logger::FIXME)
+      << "saving uploaded file of length " << bodySize << " in file '"
+      << filename << "', relative '" << relativeString << "'";
 
   bool found;
-  std::string const& value = request->value("multipart", found);
+  std::string const& value = _request->value("multipart", found);
 
   if (found) {
     bool multiPart = arangodb::basics::StringUtils::boolean(value);
 
     if (multiPart) {
       if (!parseMultiPart(body, bodySize)) {
-        generateError(rest::ResponseCode::SERVER_ERROR,
-                      TRI_ERROR_INTERNAL, "invalid multipart request");
-        return RestStatus::FAIL;
+        generateError(rest::ResponseCode::SERVER_ERROR, TRI_ERROR_INTERNAL,
+                      "invalid multipart request");
+        return RestStatus::DONE;
       }
     }
   }
@@ -110,9 +99,9 @@ RestStatus RestUploadHandler::execute() {
   try {
     FileUtils::spit(filename, body, bodySize);
   } catch (...) {
-    generateError(rest::ResponseCode::SERVER_ERROR,
-                  TRI_ERROR_INTERNAL, "could not save file");
-    return RestStatus::FAIL;
+    generateError(rest::ResponseCode::SERVER_ERROR, TRI_ERROR_INTERNAL,
+                  "could not save file");
+    return RestStatus::DONE;
   }
 
   std::string fullName = basics::FileUtils::buildFilename("uploads", relativeString);
@@ -180,8 +169,8 @@ bool RestUploadHandler::parseMultiPart(char const*& body, size_t& length) {
   std::vector<std::pair<char const*, size_t>> parts;
 
   while (ptr < end) {
-    char const* p = TRI_IsContainedMemory(ptr, end - ptr, delimiter.c_str(),
-                                          delimiter.size());
+    char const* p =
+        TRI_IsContainedMemory(ptr, end - ptr, delimiter.c_str(), delimiter.size());
     if (p == nullptr || p + delimiter.size() + 2 >= end || p - 2 <= ptr) {
       return false;
     }

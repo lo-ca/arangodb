@@ -44,6 +44,55 @@ using namespace arangodb;
 using namespace arangodb::aql;
 using CompareResult = ConditionPartCompareResult;
 
+namespace {
+
+// sort comparisons so that > and >= come before < and <=, and that
+// != and > come before ==
+// we use this to some advantage when we check the conditions for a sparse
+// index later.
+// if a sparse index is asked whether it can supported a condition such as
+// `attr < value1`, this range would include `null`, which the sparse index
+// cannot provide.
+// however, if we first check other conditions we may find a condition on
+// the same attribute, e.g. `attr > value2`.
+// this other condition may exclude `null` so we then use the full range
+// `value2 < attr < value1` and do not have to discard sub-conditions anymore
+// we can also benefit from sorting != before == for hash indexes, if there
+// is a condition that excludes null (e.g. != null). if this is tracked first,
+// we are sure the index attribute value cannot be null and we can still use
+// the sparse index
+std::function<int(AstNode const*)> const operationWeight = [](AstNode const* node) {
+  switch (node->type) {
+    case NODE_TYPE_OPERATOR_BINARY_NE:
+      // != before ==, e.g. attr != null && attr == FUNC(abc) for hash
+      // indexes
+      return 1;
+    case NODE_TYPE_OPERATOR_BINARY_GT:
+      // > before others <, e.g. attr > null && attr < abc
+      return 2;
+    case NODE_TYPE_OPERATOR_BINARY_GE:
+      // >= before others <, e.g. attr >= null && attr < abc
+      return 3;
+    case NODE_TYPE_OPERATOR_BINARY_EQ:
+      // != before ==, e.g. attr != null && attr == FUNC(abc) for hash
+      // indexes
+      return 4;
+    case NODE_TYPE_OPERATOR_BINARY_IN:
+      return 5;
+    case NODE_TYPE_OPERATOR_BINARY_NIN:
+      return 6;
+    case NODE_TYPE_OPERATOR_BINARY_LT:
+      // < after others, e.g. attr > null && attr < abc
+      return 7;
+    case NODE_TYPE_OPERATOR_BINARY_LE:
+      // <= after others, e.g. attr >= null && attr <= abc
+      return 8;
+    default:
+      // non-comparison types can come after comparisons
+      return 9;
+  }
+};
+
 struct PermutationState {
   PermutationState(arangodb::aql::AstNode const* value, size_t n)
       : value(value), current(0), n(n) {}
@@ -63,6 +112,8 @@ struct PermutationState {
   size_t current;
   size_t const n;
 };
+
+}  // namespace
 
 //        |         | a == y | a != y | a <  y | a <= y | a >= y | a > y
 // -------|------------------|--------|--------|--------|--------|--------
@@ -148,10 +199,8 @@ ConditionPartCompareResult const ConditionPart::ResultsTable[3][7][7] = {
       OTHER_CONTAINED_IN_SELF, OTHER_CONTAINED_IN_SELF, DISJOINT},
      {DISJOINT, DISJOINT, DISJOINT, DISJOINT, DISJOINT, DISJOINT, DISJOINT}}};
 
-ConditionPart::ConditionPart(Variable const* variable,
-                             std::string const& attributeName,
-                             AstNode const* operatorNode,
-                             AttributeSideType side, void* data)
+ConditionPart::ConditionPart(Variable const* variable, std::string const& attributeName,
+                             AstNode const* operatorNode, AttributeSideType side, void* data)
     : variable(variable),
       attributeName(attributeName),
       operatorType(operatorNode->type),
@@ -171,10 +220,9 @@ ConditionPart::ConditionPart(Variable const* variable,
   isExpanded = (attributeName.find("[*]") != std::string::npos);
 }
 
-ConditionPart::ConditionPart(
-    Variable const* variable,
-    std::vector<arangodb::basics::AttributeName> const& attributeNames,
-    AstNode const* operatorNode, AttributeSideType side, void* data)
+ConditionPart::ConditionPart(Variable const* variable,
+                             std::vector<arangodb::basics::AttributeName> const& attributeNames,
+                             AstNode const* operatorNode, AttributeSideType side, void* data)
     : ConditionPart(variable, "", operatorNode, side, data) {
   TRI_AttributeNamesToString(attributeNames, attributeName, false);
   isExpanded = (attributeName.find("[*]") != std::string::npos);
@@ -183,14 +231,12 @@ ConditionPart::ConditionPart(
 ConditionPart::~ConditionPart() {}
 
 /// @brief true if the condition is completely covered by the other condition
-bool ConditionPart::isCoveredBy(ConditionPart const& other,
-                                bool isReversed) const {
+bool ConditionPart::isCoveredBy(ConditionPart const& other, bool isReversed) const {
   if (variable != other.variable || attributeName != other.attributeName) {
     return false;
   }
 
-  if (!isExpanded && !other.isExpanded &&
-      other.operatorType == NODE_TYPE_OPERATOR_BINARY_IN &&
+  if (!isExpanded && !other.isExpanded && other.operatorType == NODE_TYPE_OPERATOR_BINARY_IN &&
       other.valueNode->isConstant() && isReversed) {
     if (CompareAstNodes(other.valueNode, valueNode, false) == 0) {
       return true;
@@ -205,8 +251,7 @@ bool ConditionPart::isCoveredBy(ConditionPart const& other,
   }
 
   // special cases for IN...
-  if (!isExpanded && !other.isExpanded &&
-      other.operatorType == NODE_TYPE_OPERATOR_BINARY_IN &&
+  if (!isExpanded && !other.isExpanded && other.operatorType == NODE_TYPE_OPERATOR_BINARY_IN &&
       other.valueNode->isConstant() && other.valueNode->isArray()) {
     if (operatorType == NODE_TYPE_OPERATOR_BINARY_IN &&
         valueNode->isConstant() && valueNode->isArray()) {
@@ -226,19 +271,17 @@ bool ConditionPart::isCoveredBy(ConditionPart const& other,
             auto w = other.valueNode->getMemberUnchecked(j);
 
             ConditionPartCompareResult res =
-                ConditionPart::ResultsTable[CompareAstNodes(v, w, true) + 1][0]
-                                           [0];
+                ConditionPart::ResultsTable[CompareAstNodes(v, w, true) + 1][0][0];
 
             if (res != CompareResult::OTHER_CONTAINED_IN_SELF &&
-                res != CompareResult::CONVERT_EQUAL &&
-                res != CompareResult::IMPOSSIBLE) {
+                res != CompareResult::CONVERT_EQUAL && res != CompareResult::IMPOSSIBLE) {
               return false;
             }
           }
         }
       } else {
-        std::unordered_set<AstNode const*, AstNodeValueHash, AstNodeValueEqual>
-            values(512, AstNodeValueHash(), AstNodeValueEqual());
+        std::unordered_set<AstNode const*, AstNodeValueHash, AstNodeValueEqual> values(
+            512, AstNodeValueHash(), AstNodeValueEqual());
 
         for (size_t i = 0; i < n2; ++i) {
           values.emplace(other.valueNode->getMemberUnchecked(i));
@@ -258,8 +301,7 @@ bool ConditionPart::isCoveredBy(ConditionPart const& other,
     return false;
   }
 
-  if (isExpanded && other.isExpanded &&
-      operatorType == NODE_TYPE_OPERATOR_BINARY_IN &&
+  if (isExpanded && other.isExpanded && operatorType == NODE_TYPE_OPERATOR_BINARY_IN &&
       other.operatorType == NODE_TYPE_OPERATOR_BINARY_IN &&
       other.valueNode->isConstant()) {
     return CompareAstNodes(other.valueNode, valueNode, false) == 0;
@@ -271,21 +313,18 @@ bool ConditionPart::isCoveredBy(ConditionPart const& other,
     if (a != b) {
       return false;
     }
-    TRI_ASSERT(operatorNode->numMembers() == 3 &&
-               other.operatorNode->numMembers() == 3);
+    TRI_ASSERT(operatorNode->numMembers() == 3 && other.operatorNode->numMembers() == 3);
 
     AstNode* q1 = operatorNode->getMemberUnchecked(2);
     TRI_ASSERT(q1->type == NODE_TYPE_QUANTIFIER);
     AstNode* q2 = other.operatorNode->getMemberUnchecked(2);
     TRI_ASSERT(q2->type == NODE_TYPE_QUANTIFIER);
     // do only cover ALL and NONE when both sides have same quantifier
-    if (q1->getIntValue() != q2->getIntValue() ||
-        q1->getIntValue() == Quantifier::ANY) {
+    if (q1->getIntValue() != q2->getIntValue() || q1->getIntValue() == Quantifier::ANY) {
       return false;
     }
 
-    if (isExpanded && other.isExpanded &&
-        operatorType == NODE_TYPE_OPERATOR_BINARY_ARRAY_IN &&
+    if (isExpanded && other.isExpanded && operatorType == NODE_TYPE_OPERATOR_BINARY_ARRAY_IN &&
         other.operatorType == NODE_TYPE_OPERATOR_BINARY_ARRAY_IN &&
         other.valueNode->isConstant()) {
       return CompareAstNodes(other.valueNode, valueNode, false) == 0;
@@ -293,9 +332,9 @@ bool ConditionPart::isCoveredBy(ConditionPart const& other,
   }
 
   // Results are -1, 0, 1, move to 0, 1, 2 for the lookup:
-  ConditionPartCompareResult res = ConditionPart::ResultsTable
-      [CompareAstNodes(other.valueNode, valueNode, true) + 1]
-      [other.whichCompareOperation()][whichCompareOperation()];
+  ConditionPartCompareResult res =
+      ConditionPart::ResultsTable[CompareAstNodes(other.valueNode, valueNode, true) + 1]
+                                 [other.whichCompareOperation()][whichCompareOperation()];
 
   if (res == CompareResult::OTHER_CONTAINED_IN_SELF ||
       res == CompareResult::CONVERT_EQUAL || res == CompareResult::IMPOSSIBLE) {
@@ -307,8 +346,7 @@ bool ConditionPart::isCoveredBy(ConditionPart const& other,
 
 /// @brief clears the attribute access data
 static inline void clearAttributeAccess(
-    std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>>&
-        parts) {
+    std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>>& parts) {
   parts.first = nullptr;
   parts.second.clear();
 }
@@ -317,15 +355,31 @@ static inline void clearAttributeAccess(
 Condition::Condition(Ast* ast)
     : _ast(ast), _root(nullptr), _isNormalized(false), _isSorted(false) {}
 
+/*namespace {
+size_t countNodes(AstNode* node) {
+  if (node == nullptr) {
+    return 0;
+  }
+
+  size_t n = node->numMembers();
+  size_t sum = 1;
+  for (size_t i = 0; i < n; i++) {
+    sum += countNodes(node->getMember(i));
+  }
+
+  return sum;
+}
+}*/
+
 /// @brief destroy the condition
 Condition::~Condition() {
   // memory for nodes is not owned and thus not freed by the condition
   // all nodes belong to the AST
+  // LOG_TOPIC(ERR, Logger::FIXME) << "nodes in tree: " << ::countNodes(_root);
 }
 
 /// @brief export the condition as VelocyPack
-void Condition::toVelocyPack(arangodb::velocypack::Builder& builder,
-                             bool verbose) const {
+void Condition::toVelocyPack(arangodb::velocypack::Builder& builder, bool verbose) const {
   if (_root == nullptr) {
     VPackObjectBuilder guard(&builder);
   } else {
@@ -334,8 +388,7 @@ void Condition::toVelocyPack(arangodb::velocypack::Builder& builder,
 }
 
 /// @brief create a condition from VPack
-Condition* Condition::fromVPack(ExecutionPlan* plan,
-                                arangodb::velocypack::Slice const& slice) {
+Condition* Condition::fromVPack(ExecutionPlan* plan, arangodb::velocypack::Slice const& slice) {
   auto condition = std::make_unique<Condition>(plan->getAst());
 
   if (slice.isObject() && slice.length() != 0) {
@@ -387,13 +440,12 @@ void Condition::andCombine(AstNode const* node) {
 /// @brief locate indexes for each condition
 /// return value is a pair indicating whether the index can be used for
 /// filtering(first) and sorting(second)
-std::pair<bool, bool> Condition::findIndexes(
-    EnumerateCollectionNode const* node,
-    std::vector<transaction::Methods::IndexHandle>& usedIndexes,
-    SortCondition const* sortCondition) {
+std::pair<bool, bool> Condition::findIndexes(EnumerateCollectionNode const* node,
+                                             std::vector<transaction::Methods::IndexHandle>& usedIndexes,
+                                             SortCondition const* sortCondition) {
   TRI_ASSERT(usedIndexes.empty());
   Variable const* reference = node->outVariable();
-  std::string collectionName = node->collection()->getName();
+  std::string collectionName = node->collection()->name();
 
   transaction::Methods* trx = _ast->query()->trx();
 
@@ -405,25 +457,24 @@ std::pair<bool, bool> Condition::findIndexes(
     // for statistics queries that do not need a fully accurate collection count
     itemsInIndex = 1024;
   } else {
-    // actually count number of items in index
+    // estimate for the number of documents in the index. may be outdated...
     itemsInIndex = node->collection()->count(trx);
   }
   if (_root == nullptr) {
     size_t dummy;
-    return trx->getIndexForSortCondition(collectionName, sortCondition,
-                                         reference, itemsInIndex, usedIndexes,
-                                         dummy);
+    return trx->getIndexForSortCondition(collectionName, sortCondition, reference,
+                                         itemsInIndex, usedIndexes, dummy);
   }
 
-  return trx->getBestIndexHandlesForFilterCondition(
-      collectionName, _ast, _root, reference, sortCondition, itemsInIndex,
-      usedIndexes, _isSorted);
+  return trx->getBestIndexHandlesForFilterCondition(collectionName, _ast, _root,
+                                                    reference, sortCondition, itemsInIndex,
+                                                    usedIndexes, _isSorted);
 }
 
 /// @brief get the attributes for a sub-condition that are const
 /// (i.e. compared with equality)
-std::vector<std::vector<arangodb::basics::AttributeName>>
-Condition::getConstAttributes(Variable const* reference, bool includeNull) {
+std::vector<std::vector<arangodb::basics::AttributeName>> Condition::getConstAttributes(
+    Variable const* reference, bool includeNull) const {
   std::vector<std::vector<arangodb::basics::AttributeName>> result;
 
   if (_root == nullptr) {
@@ -436,8 +487,7 @@ Condition::getConstAttributes(Variable const* reference, bool includeNull) {
     return result;
   }
 
-  std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>>
-      parts;
+  std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>> parts;
   AstNode const* node = _root->getMember(0);
   n = node->numMembers();
 
@@ -450,18 +500,14 @@ Condition::getConstAttributes(Variable const* reference, bool includeNull) {
       auto lhs = member->getMember(0);
       auto rhs = member->getMember(1);
 
-      if (lhs->isAttributeAccessForVariable(parts) &&
-          parts.first == reference) {
-        if (includeNull ||
-            ((rhs->isConstant() || rhs->type == NODE_TYPE_REFERENCE) &&
-             !rhs->isNullValue())) {
+      if (lhs->isAttributeAccessForVariable(parts) && parts.first == reference) {
+        if (includeNull || ((rhs->isConstant() || rhs->type == NODE_TYPE_REFERENCE) &&
+                            !rhs->isNullValue())) {
           result.emplace_back(std::move(parts.second));
         }
-      } else if (rhs->isAttributeAccessForVariable(parts) &&
-                 parts.first == reference) {
-        if (includeNull ||
-            ((lhs->isConstant() || lhs->type == NODE_TYPE_REFERENCE) &&
-             !lhs->isNullValue())) {
+      } else if (rhs->isAttributeAccessForVariable(parts) && parts.first == reference) {
+        if (includeNull || ((lhs->isConstant() || lhs->type == NODE_TYPE_REFERENCE) &&
+                            !lhs->isNullValue())) {
           result.emplace_back(std::move(parts.second));
         }
       }
@@ -479,7 +525,8 @@ void Condition::normalize(ExecutionPlan* plan) {
     return;
   }
 
-  _root = transformNode(_root);
+  _root = transformNodePreorder(_root);
+  _root = transformNodePostorder(_root);
   _root = fixRoot(_root, 0);
 
   optimize(plan);
@@ -502,31 +549,54 @@ void Condition::normalize() {
     return;
   }
 
-  _root = transformNode(_root);
+  _root = transformNodePreorder(_root);
+  _root = transformNodePostorder(_root);
   _root = fixRoot(_root, 0);
 
 #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
   if (_root != nullptr) {
-    // _root->dump(0);
     validateAst(_root, 0);
   }
 #endif
 }
 
-void Condition::CollectOverlappingMembers(ExecutionPlan const* plan,
-                                          Variable const* variable,
-                                          AstNode* andNode,
-                                          AstNode* otherAndNode,
-                                          std::unordered_set<size_t>& toRemove,
+void Condition::collectOverlappingMembers(ExecutionPlan const* plan, Variable const* variable,
+                                          AstNode const* andNode, AstNode const* otherAndNode,
+                                          arangodb::HashSet<size_t>& toRemove,
+                                          Index const* index, /* may be nullptr */
                                           bool isFromTraverser) {
-  std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>>
-      result;
+  bool const isSparse = (index != nullptr && index->sparse());
+
+  std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>> result;
 
   size_t const n = andNode->numMembers();
 
   for (size_t i = 0; i < n; ++i) {
     auto operand = andNode->getMemberUnchecked(i);
     bool allowOps = operand->isComparisonOperator();
+
+    if (isSparse && allowOps && !isFromTraverser &&
+        (operand->type == NODE_TYPE_OPERATOR_BINARY_NE ||
+         operand->type == NODE_TYPE_OPERATOR_BINARY_GT)) {
+      // look   for != null   and   > null
+      // these can be removed if we are working with a sparse index!
+      auto lhs = operand->getMember(0);
+      auto rhs = operand->getMember(1);
+
+      clearAttributeAccess(result);
+
+      // only remove the condition if the index is exactly on the same attribute
+      // as the condition
+      if (rhs->isNullValue() && lhs->isAttributeAccessForVariable(result, isFromTraverser) &&
+          result.first == variable && index->fields().size() == 1 &&
+          arangodb::basics::AttributeName::isIdentical(result.second,
+                                                       index->fields()[0], false)) {
+        toRemove.emplace(i);
+        // removed, no need to go on below...
+        continue;
+      }
+    }
+
     if (isFromTraverser) {
       allowOps = allowOps || operand->isArrayComparisonOperator();
     } else {
@@ -544,25 +614,22 @@ void Condition::CollectOverlappingMembers(ExecutionPlan const* plan,
 
         if (lhs->isAttributeAccessForVariable(result, isFromTraverser) &&
             result.first == variable) {
-          ConditionPart current(variable, result.second, operand,
-                                ATTRIBUTE_LEFT, nullptr);
+          ConditionPart current(variable, result.second, operand, ATTRIBUTE_LEFT, nullptr);
 
-          if (CanRemove(plan, current, otherAndNode, isFromTraverser)) {
+          if (canRemove(plan, current, otherAndNode, isFromTraverser)) {
             toRemove.emplace(i);
           }
         }
       }
 
-      if (rhs->type == NODE_TYPE_ATTRIBUTE_ACCESS ||
-          rhs->type == NODE_TYPE_EXPANSION) {
+      if (rhs->type == NODE_TYPE_ATTRIBUTE_ACCESS || rhs->type == NODE_TYPE_EXPANSION) {
         clearAttributeAccess(result);
 
         if (rhs->isAttributeAccessForVariable(result, isFromTraverser) &&
             result.first == variable) {
-          ConditionPart current(variable, result.second, operand,
-                                ATTRIBUTE_RIGHT, nullptr);
+          ConditionPart current(variable, result.second, operand, ATTRIBUTE_RIGHT, nullptr);
 
-          if (CanRemove(plan, current, otherAndNode, isFromTraverser)) {
+          if (canRemove(plan, current, otherAndNode, isFromTraverser)) {
             toRemove.emplace(i);
           }
         }
@@ -572,32 +639,33 @@ void Condition::CollectOverlappingMembers(ExecutionPlan const* plan,
 }
 
 /// @brief removes condition parts from another
-AstNode* Condition::removeIndexCondition(ExecutionPlan const* plan,
-                                         Variable const* variable,
-                                         AstNode* other) {
-  if (_root == nullptr || other == nullptr) {
+AstNode* Condition::removeIndexCondition(ExecutionPlan const* plan, Variable const* variable,
+                                         AstNode const* condition, Index const* index) {
+  TRI_ASSERT(index != nullptr);
+
+  if (_root == nullptr || condition == nullptr) {
     return _root;
   }
 
   TRI_ASSERT(_root != nullptr);
   TRI_ASSERT(_root->type == NODE_TYPE_OPERATOR_NARY_OR);
 
-  TRI_ASSERT(other != nullptr);
-  TRI_ASSERT(other->type == NODE_TYPE_OPERATOR_NARY_OR);
+  TRI_ASSERT(condition != nullptr);
+  TRI_ASSERT(condition->type == NODE_TYPE_OPERATOR_NARY_OR);
 
-  if (other->numMembers() != 1 && _root->numMembers() != 1) {
+  if (condition->numMembers() != 1 && _root->numMembers() != 1) {
     return _root;
   }
 
   auto andNode = _root->getMemberUnchecked(0);
   TRI_ASSERT(andNode->type == NODE_TYPE_OPERATOR_NARY_AND);
-  auto otherAndNode = other->getMemberUnchecked(0);
-  TRI_ASSERT(otherAndNode->type == NODE_TYPE_OPERATOR_NARY_AND);
   size_t const n = andNode->numMembers();
 
-  std::unordered_set<size_t> toRemove;
-  CollectOverlappingMembers(plan, variable, andNode, otherAndNode, toRemove,
-                            false);
+  auto conditionAndNode = condition->getMemberUnchecked(0);
+  TRI_ASSERT(conditionAndNode->type == NODE_TYPE_OPERATOR_NARY_AND);
+
+  arangodb::HashSet<size_t> toRemove;
+  collectOverlappingMembers(plan, variable, andNode, conditionAndNode, toRemove, index, false);
 
   if (toRemove.empty()) {
     return _root;
@@ -626,8 +694,7 @@ AstNode* Condition::removeIndexCondition(ExecutionPlan const* plan,
 
 /// @brief remove filter conditions already covered by the traversal
 AstNode* Condition::removeTraversalCondition(ExecutionPlan const* plan,
-                                             Variable const* variable,
-                                             AstNode* other) {
+                                             Variable const* variable, AstNode* other) {
   if (_root == nullptr || other == nullptr) {
     return _root;
   }
@@ -646,9 +713,8 @@ AstNode* Condition::removeTraversalCondition(ExecutionPlan const* plan,
   TRI_ASSERT(otherAndNode->type == NODE_TYPE_OPERATOR_NARY_AND);
   size_t const n = andNode->numMembers();
 
-  std::unordered_set<size_t> toRemove;
-  CollectOverlappingMembers(plan, variable, andNode, otherAndNode, toRemove,
-                            true);
+  arangodb::HashSet<size_t> toRemove;
+  collectOverlappingMembers(plan, variable, andNode, otherAndNode, toRemove, nullptr, true);
 
   if (toRemove.empty()) {
     return _root;
@@ -675,8 +741,7 @@ AstNode* Condition::removeTraversalCondition(ExecutionPlan const* plan,
 }
 
 /// @brief remove (now) invalid variables from the condition
-bool Condition::removeInvalidVariables(
-    std::unordered_set<Variable const*> const& validVars) {
+bool Condition::removeInvalidVariables(arangodb::HashSet<Variable const*> const& validVars) {
   if (_root == nullptr) {
     return false;
   }
@@ -684,14 +749,22 @@ bool Condition::removeInvalidVariables(
   TRI_ASSERT(_root != nullptr);
   TRI_ASSERT(_root->type == NODE_TYPE_OPERATOR_NARY_OR);
 
+  auto oldRoot = _root;
+  _root = _ast->shallowCopyForModify(oldRoot);
+  TRI_DEFER(FINALIZE_SUBTREE(_root));
+
   bool isEmpty = false;
 
   // handle sub nodes of top-level OR node
   size_t const n = _root->numMembers();
-  std::unordered_set<Variable const*> varsUsed;
+  arangodb::HashSet<Variable const*> varsUsed;
 
   for (size_t i = 0; i < n; ++i) {
-    auto andNode = _root->getMemberUnchecked(i);
+    auto oldAndNode = _root->getMemberUnchecked(i);
+    auto andNode = _ast->shallowCopyForModify(oldAndNode);
+    TRI_DEFER(FINALIZE_SUBTREE(andNode));
+    _root->changeMember(i, andNode);
+
     TRI_ASSERT(andNode->type == NODE_TYPE_OPERATOR_NARY_AND);
 
     size_t nAnd = andNode->numMembers();
@@ -737,8 +810,11 @@ void Condition::optimize(ExecutionPlan* plan) {
   TRI_ASSERT(_root != nullptr);
   TRI_ASSERT(_root->type == NODE_TYPE_OPERATOR_NARY_OR);
 
-  std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>>
-      varAccess;
+  auto oldRoot = _root;
+  _root = _ast->shallowCopyForModify(oldRoot);
+  TRI_DEFER(FINALIZE_SUBTREE(_root));
+
+  std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>> varAccess;
 
   // handle sub nodes of top-level OR node
   size_t n = _root->numMembers();
@@ -746,8 +822,11 @@ void Condition::optimize(ExecutionPlan* plan) {
 
   while (r < n) {  // foreach OR-Node
     bool retry = false;
-    auto andNode = _root->getMemberUnchecked(r);
-    TRI_ASSERT(andNode->type == NODE_TYPE_OPERATOR_NARY_AND);
+    auto oldAnd = _root->getMemberUnchecked(r);
+    TRI_ASSERT(oldAnd->type == NODE_TYPE_OPERATOR_NARY_AND);
+    auto andNode = _ast->shallowCopyForModify(oldAnd);
+    _root->changeMember(r, andNode);
+    TRI_DEFER(FINALIZE_SUBTREE(andNode));
 
   restartThisOrItem:
     size_t andNumMembers = andNode->numMembers();
@@ -759,8 +838,9 @@ void Condition::optimize(ExecutionPlan* plan) {
 
       if (op->type == NODE_TYPE_OPERATOR_BINARY_IN) {
         ++inComparisons;
+        auto deduplicated = deduplicateInOperation(op);
+        andNode->changeMember(j, deduplicated);
       }
-      deduplicateInOperation(op);
     }
     andNumMembers = andNode->numMembers();
 
@@ -775,34 +855,30 @@ void Condition::optimize(ExecutionPlan* plan) {
 
     // sort AND parts of each sub-condition so > and >= come before < and <=
     // we use this to some advantage when we check the conditions for a sparse
-    // index
-    // later.
+    // index later.
     // if a sparse index is asked whether it can supported a condition such as
-    // `attr < value1`,
-    // this range would include `null`, which the sparse index cannot provide.
-    // however, if we
-    // first check other conditions we may find a condition on the same
-    // attribute, e.g. `attr > value2`.
+    // `attr < value1`, this range would include `null`, which the sparse index
+    // cannot provide.
+    // however, if we first check other conditions we may find a condition on
+    // the same attribute, e.g. `attr > value2`.
     // this other condition may exclude `null` so we then use the full range
     // `value2 < attr < value1`
     // and do not have to discard sub-conditions anymore
     andNode->sortMembers([](AstNode const* lhs, AstNode const* rhs) {
-      if ((lhs->type != NODE_TYPE_OPERATOR_BINARY_LT &&
-           lhs->type != NODE_TYPE_OPERATOR_BINARY_LE) &&
-          (rhs->type == NODE_TYPE_OPERATOR_BINARY_LT ||
-           rhs->type == NODE_TYPE_OPERATOR_BINARY_LE)) {
-        // sort < and <= after other comparison operators
-        return true;
+      // try to re-order comparison operators
+      int l = ::operationWeight(lhs);
+      int r = ::operationWeight(rhs);
+      if (l != r) {
+        return l < r;
       }
-      if ((lhs->type == NODE_TYPE_OPERATOR_BINARY_LT ||
-           lhs->type == NODE_TYPE_OPERATOR_BINARY_LE) &&
-          (rhs->type != NODE_TYPE_OPERATOR_BINARY_LT &&
-           rhs->type != NODE_TYPE_OPERATOR_BINARY_LE)) {
-        // sort < and <= after other comparison operators
-        return false;
+
+      // all equal, now check if original types are different
+      if (lhs->type != rhs->type) {
+        return lhs->type < rhs->type;
       }
-      // compare pointers as last resort
-      return (lhs->type < rhs->type);
+
+      // still all equal
+      return false;
     });
 
     if (inComparisons > 0) {
@@ -848,16 +924,13 @@ void Condition::optimize(ExecutionPlan* plan) {
           if (lhs->isConstant()) {
             lhs = Ast::resolveConstAttributeAccess(lhs);
           }
-          storeAttributeAccess(varAccess, variableUsage, lhs, j,
-                               ATTRIBUTE_LEFT);
+          storeAttributeAccess(varAccess, variableUsage, lhs, j, ATTRIBUTE_LEFT);
         }
-        if (rhs->type == NODE_TYPE_ATTRIBUTE_ACCESS ||
-            rhs->type == NODE_TYPE_EXPANSION) {
+        if (rhs->type == NODE_TYPE_ATTRIBUTE_ACCESS || rhs->type == NODE_TYPE_EXPANSION) {
           if (rhs->type == NODE_TYPE_ATTRIBUTE_ACCESS && rhs->isConstant()) {
             rhs = Ast::resolveConstAttributeAccess(rhs);
           }
-          storeAttributeAccess(varAccess, variableUsage, rhs, j,
-                               ATTRIBUTE_RIGHT);
+          storeAttributeAccess(varAccess, variableUsage, rhs, j, ATTRIBUTE_RIGHT);
         }
       }
     }
@@ -877,10 +950,14 @@ void Condition::optimize(ExecutionPlan* plan) {
         }
 
         // multiple occurrences of the same attribute
-        auto leftNode = andNode->getMemberUnchecked(positions[0].first);
+        size_t leftPos = positions[0].first;
+        // copy & modify leftNode
+        auto oldLeft = andNode->getMemberUnchecked(leftPos);
+        auto leftNode = _ast->shallowCopyForModify(oldLeft);
+        TRI_DEFER(FINALIZE_SUBTREE(leftNode));
+        andNode->changeMember(leftPos, leftNode);
 
-        ConditionPart current(variable, attributeName, leftNode,
-                              positions[0].second, nullptr);
+        ConditionPart current(variable, attributeName, leftNode, positions[0].second, nullptr);
 
         if (!current.valueNode->isConstant()) {
           continue;
@@ -890,10 +967,10 @@ void Condition::optimize(ExecutionPlan* plan) {
 
         while (j < positions.size()) {
           TRI_ASSERT(j != 0);
-          auto rightNode = andNode->getMemberUnchecked(positions[j].first);
+          auto rightPos = positions[j].first;
+          auto rightNode = andNode->getMemberUnchecked(rightPos);
 
-          ConditionPart other(variable, attributeName, rightNode,
-                              positions[j].second, nullptr);
+          ConditionPart other(variable, attributeName, rightNode, positions[j].second, nullptr);
 
           if (!other.valueNode->isConstant()) {
             ++j;
@@ -910,11 +987,12 @@ void Condition::optimize(ExecutionPlan* plan) {
               // merge IN with IN on same attribute
               TRI_ASSERT(rightNode->numMembers() == 2);
 
-              auto merged = _ast->createNodeBinaryOperator(
-                  NODE_TYPE_OPERATOR_BINARY_IN, leftNode->getMemberUnchecked(0),
-                  mergeInOperations(trx, leftNode, rightNode));
-              andNode->removeMemberUnchecked(positions[j].first);
-              andNode->changeMember(positions[0].first, merged);
+              auto merged =
+                  _ast->createNodeBinaryOperator(NODE_TYPE_OPERATOR_BINARY_IN,
+                                                 leftNode->getMemberUnchecked(0),
+                                                 mergeInOperations(trx, leftNode, rightNode));
+              andNode->removeMemberUnchecked(rightPos);
+              andNode->changeMember(leftPos, merged);
               goto restartThisOrItem;
             } else if (rightNode->isSimpleComparisonOperator()) {
               // merge other comparison operator with IN
@@ -926,14 +1004,12 @@ void Condition::optimize(ExecutionPlan* plan) {
               // enumerate over IN list
               for (size_t k = 0; k < values->numMembers(); ++k) {
                 auto value = values->getMemberUnchecked(k);
-                ConditionPartCompareResult res = ConditionPart::ResultsTable
-                    [CompareAstNodes(value, other.valueNode, true) + 1]
-                    [0 /*NODE_TYPE_OPERATOR_BINARY_EQ*/]
-                    [other.whichCompareOperation()];
+                ConditionPartCompareResult res =
+                    ConditionPart::ResultsTable[CompareAstNodes(value, other.valueNode, true) + 1][0 /*NODE_TYPE_OPERATOR_BINARY_EQ*/]
+                                               [other.whichCompareOperation()];
 
-                bool const keep =
-                    (res == CompareResult::OTHER_CONTAINED_IN_SELF ||
-                     res == CompareResult::CONVERT_EQUAL);
+                bool const keep = (res == CompareResult::OTHER_CONTAINED_IN_SELF ||
+                                   res == CompareResult::CONVERT_EQUAL);
 
                 if (keep) {
                   inNode->addMember(value);
@@ -949,8 +1025,9 @@ void Condition::optimize(ExecutionPlan* plan) {
 
               // use the new array of values
               leftNode->changeMember(1, inNode);
+
               // remove the other operator
-              andNode->removeMemberUnchecked(positions[j].first);
+              andNode->removeMemberUnchecked(rightPos);
               goto restartThisOrItem;
             }
           }
@@ -985,13 +1062,12 @@ void Condition::optimize(ExecutionPlan* plan) {
               TRI_ASSERT(!positions.empty());
               TRI_ASSERT(j < positions.size());
               andNode->removeMemberUnchecked(positions.at(j).first);
-              auto origNode =
-                  andNode->getMemberUnchecked(positions.at(0).first);
-              auto newNode =
-                  plan->getAst()->createNode(NODE_TYPE_OPERATOR_BINARY_EQ);
+              auto origNode = andNode->getMemberUnchecked(positions.at(0).first);
+              auto newNode = plan->getAst()->createNode(NODE_TYPE_OPERATOR_BINARY_EQ);
               for (size_t iMemb = 0; iMemb < origNode->numMembers(); iMemb++) {
                 newNode->addMember(origNode->getMemberUnchecked(iMemb));
               }
+              TRI_DEFER(FINALIZE_SUBTREE(newNode));
 
               andNode->changeMember(positions.at(0).first, newNode);
               goto restartThisOrItem;
@@ -1022,8 +1098,7 @@ void Condition::optimize(ExecutionPlan* plan) {
 
 /// @brief registers an attribute access for a particular (collection) variable
 void Condition::storeAttributeAccess(
-    std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>>&
-        varAccess,
+    std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>>& varAccess,
     VariableUsageType& variableUsage, AstNode const* node, size_t position,
     AttributeSideType side) {
   if (!node->isAttributeAccessForVariable(varAccess)) {
@@ -1033,25 +1108,10 @@ void Condition::storeAttributeAccess(
   auto variable = varAccess.first;
 
   if (variable != nullptr) {
-    auto it = variableUsage.find(variable);
-
-    if (it == variableUsage.end()) {
-      // nothing recorded yet for variable
-      it = variableUsage.emplace(variable, AttributeUsageType()).first;
-    }
-
     std::string attributeName;
     TRI_AttributeNamesToString(varAccess.second, attributeName, false);
 
-    auto it2 = (*it).second.find(attributeName);
-
-    if (it2 == (*it).second.end()) {
-      // nothing recorded yet for attribute name in this variable
-      it2 = (*it).second.emplace(attributeName, UsagePositionType()).first;
-    }
-
-    auto& dst = (*it2).second;
-
+    auto& dst = variableUsage[variable][attributeName];
     if (!dst.empty() && dst.back().first == position) {
       // already have this attribute for this variable. can happen in case a
       // condition refers to itself (e.g. a.x == a.x)
@@ -1088,14 +1148,12 @@ void Condition::validateAst(AstNode const* node, int level) {
 #endif
 
 /// @brief checks if the current condition is covered by the other
-bool Condition::CanRemove(ExecutionPlan const* plan, ConditionPart const& me,
-                          arangodb::aql::AstNode const* andNode,
-                          bool isFromTraverser) {
+bool Condition::canRemove(ExecutionPlan const* plan, ConditionPart const& me,
+                          arangodb::aql::AstNode const* andNode, bool isFromTraverser) {
   TRI_ASSERT(andNode != nullptr);
   TRI_ASSERT(andNode->type == NODE_TYPE_OPERATOR_NARY_AND);
 
-  std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>>
-      result;
+  std::pair<Variable const*, std::vector<arangodb::basics::AttributeName>> result;
 
   size_t const n = andNode->numMembers();
 
@@ -1103,9 +1161,8 @@ bool Condition::CanRemove(ExecutionPlan const* plan, ConditionPart const& me,
     if (node->type == NODE_TYPE_REFERENCE) {
       auto setter =
           plan->getVarSetBy(static_cast<Variable const*>(node->getData())->id);
-      if (setter != nullptr &&
-          setter->getType() == ExecutionNode::CALCULATION) {
-        auto cn = static_cast<CalculationNode const*>(setter);
+      if (setter != nullptr && setter->getType() == ExecutionNode::CALCULATION) {
+        auto cn = ExecutionNode::castTo<CalculationNode const*>(setter);
         // use expression node instead
         node = cn->expression()->node();
       }
@@ -1113,6 +1170,8 @@ bool Condition::CanRemove(ExecutionPlan const* plan, ConditionPart const& me,
     // return string representation
     return node->toString();
   };
+
+  std::string temp;
 
   try {
     for (size_t i = 0; i < n; ++i) {
@@ -1128,39 +1187,46 @@ bool Condition::CanRemove(ExecutionPlan const* plan, ConditionPart const& me,
           clearAttributeAccess(result);
 
           if (lhs->isAttributeAccessForVariable(result, isFromTraverser)) {
-            if (rhs->isConstant()) {
-              ConditionPart indexCondition(result.first, result.second, operand,
-                                           ATTRIBUTE_LEFT, nullptr);
+            temp.clear();
+            TRI_AttributeNamesToString(result.second, temp);
+            if (temp == me.attributeName) {
+              if (rhs->isConstant()) {
+                ConditionPart indexCondition(result.first, result.second,
+                                             operand, ATTRIBUTE_LEFT, nullptr);
 
-              if (me.isCoveredBy(indexCondition, false)) {
+                if (me.isCoveredBy(indexCondition, false)) {
+                  return true;
+                }
+              }
+              // non-constant condition
+              else if (me.operatorType == operand->type &&
+                       normalize(me.valueNode) == normalize(rhs)) {
                 return true;
               }
-            }
-            // non-constant condition
-            else if (me.operatorType == operand->type &&
-                     normalize(me.valueNode) == normalize(rhs)) {
-              return true;
             }
           }
         }
 
-        if (rhs->type == NODE_TYPE_ATTRIBUTE_ACCESS ||
-            rhs->type == NODE_TYPE_EXPANSION) {
+        if (rhs->type == NODE_TYPE_ATTRIBUTE_ACCESS || rhs->type == NODE_TYPE_EXPANSION) {
           clearAttributeAccess(result);
 
           if (rhs->isAttributeAccessForVariable(result, isFromTraverser)) {
-            if (lhs->isConstant()) {
-              ConditionPart indexCondition(result.first, result.second, operand,
-                                           ATTRIBUTE_RIGHT, nullptr);
+            temp.clear();
+            TRI_AttributeNamesToString(result.second, temp);
+            if (temp == me.attributeName) {
+              if (lhs->isConstant()) {
+                ConditionPart indexCondition(result.first, result.second,
+                                             operand, ATTRIBUTE_RIGHT, nullptr);
 
-              if (me.isCoveredBy(indexCondition, true)) {
+                if (me.isCoveredBy(indexCondition, true)) {
+                  return true;
+                }
+              }
+              // non-constant condition
+              else if (me.operatorType == operand->type &&
+                       normalize(me.valueNode) == normalize(lhs)) {
                 return true;
               }
-            }
-            // non-constant condition
-            else if (me.operatorType == operand->type &&
-                     normalize(me.valueNode) == normalize(lhs)) {
-              return true;
             }
           }
         }
@@ -1175,26 +1241,25 @@ bool Condition::CanRemove(ExecutionPlan const* plan, ConditionPart const& me,
 
 /// @brief deduplicate IN condition values (and sort them)
 /// this may modify the node in place
-void Condition::deduplicateInOperation(AstNode* operation) {
-  if (operation->type != NODE_TYPE_OPERATOR_BINARY_IN) {
-    return;
-  }
-
-  // found an IN
+AstNode* Condition::deduplicateInOperation(AstNode* operation) {
   TRI_ASSERT(operation->numMembers() == 2);
 
   auto rhs = operation->getMemberUnchecked(1);
-
   if (!rhs->isArray() || !rhs->isConstant()) {
-    return;
+    return operation;
   }
 
   auto deduplicated = _ast->deduplicateArray(rhs);
-
   if (deduplicated != rhs) {
     // there were duplicates
-    operation->changeMember(1, const_cast<AstNode*>(deduplicated));
+    auto newOperation = _ast->shallowCopyForModify(operation);
+    TRI_DEFER(FINALIZE_SUBTREE(newOperation));
+
+    newOperation->changeMember(1, const_cast<AstNode*>(deduplicated));
+    return newOperation;
   }
+
+  return operation;
 }
 
 /// @brief merge the values from two IN operations
@@ -1214,8 +1279,7 @@ AstNode* Condition::mergeInOperations(transaction::Methods* trx,
 
 /// @brief merges the current node with the sub nodes of same type
 AstNode* Condition::collapse(AstNode const* node) {
-  TRI_ASSERT(node->type == NODE_TYPE_OPERATOR_NARY_OR ||
-             node->type == NODE_TYPE_OPERATOR_NARY_AND);
+  TRI_ASSERT(node->type == NODE_TYPE_OPERATOR_NARY_OR || node->type == NODE_TYPE_OPERATOR_NARY_AND);
 
   auto newOperator = _ast->createNode(node->type);
 
@@ -1223,7 +1287,6 @@ AstNode* Condition::collapse(AstNode const* node) {
 
   for (size_t i = 0; i < n; ++i) {
     auto sub = node->getMemberUnchecked(i);
-
     bool const isSame = (node->type == sub->type) ||
                         (node->type == NODE_TYPE_OPERATOR_NARY_OR &&
                          sub->type == NODE_TYPE_OPERATOR_BINARY_OR) ||
@@ -1231,7 +1294,7 @@ AstNode* Condition::collapse(AstNode const* node) {
                          sub->type == NODE_TYPE_OPERATOR_BINARY_AND);
 
     if (isSame) {
-      // merge
+      // merge children one level up
       for (size_t j = 0; j < sub->numMembers(); ++j) {
         newOperator->addMember(sub->getMemberUnchecked(j));
       }
@@ -1243,74 +1306,79 @@ AstNode* Condition::collapse(AstNode const* node) {
   return newOperator;
 }
 
-void switchSidesInCompare(AstNode* node) {
+// this may modify the node in place
+AstNode* switchSidesInCompare(Ast* ast, AstNode* node) {
   // switch members of BINARY_LT/GT/LE/GE_NODES
   // and change operator accordingly
 
   auto first = node->getMemberUnchecked(0);
   auto second = node->getMemberUnchecked(1);
 
-  node->changeMember(0,second);
-  node->changeMember(1,first);
+  auto newOperator = ast->shallowCopyForModify(node);
+  TRI_DEFER(FINALIZE_SUBTREE(newOperator));
 
-  switch(node->type) {
+  newOperator->changeMember(0, second);
+  newOperator->changeMember(1, first);
+
+  switch (node->type) {
     case NODE_TYPE_OPERATOR_BINARY_LT:
-      node->type = NODE_TYPE_OPERATOR_BINARY_GT;
+      newOperator->type = NODE_TYPE_OPERATOR_BINARY_GT;
       break;
     case NODE_TYPE_OPERATOR_BINARY_GT:
-      node->type = NODE_TYPE_OPERATOR_BINARY_LT;
+      newOperator->type = NODE_TYPE_OPERATOR_BINARY_LT;
       break;
     case NODE_TYPE_OPERATOR_BINARY_LE:
-      node->type = NODE_TYPE_OPERATOR_BINARY_GE;
+      newOperator->type = NODE_TYPE_OPERATOR_BINARY_GE;
       break;
     case NODE_TYPE_OPERATOR_BINARY_GE:
-      node->type = NODE_TYPE_OPERATOR_BINARY_LE;
+      newOperator->type = NODE_TYPE_OPERATOR_BINARY_LE;
       break;
     default:
-      LOG_TOPIC(ERR, Logger::QUERIES) << "normalize condition tries to swap children"
-                                      << "of wrong node type - this needs to be fixed";
+      LOG_TOPIC(ERR, Logger::QUERIES)
+          << "normalize condition tries to swap children"
+          << "of wrong node type - this needs to be fixed";
       TRI_ASSERT(false);
   }
+
+  return newOperator;
 }
 
-void normalizeCompare(AstNode* node) {
+AstNode* normalizeCompare(Ast* ast, AstNode* node) {
   // Moves attribute access to the LHS of a comparison.
   // If there are 2 attribute accesses it does a
   // string compare of the access path and makes sure
   // the one that compares less ends up on the LHS
-
   if (node->type != NODE_TYPE_OPERATOR_BINARY_LE &&
-      node->type != NODE_TYPE_OPERATOR_BINARY_LT &&
-      node->type != NODE_TYPE_OPERATOR_BINARY_GE &&
-      node->type != NODE_TYPE_OPERATOR_BINARY_GT )
-  {
+      node->type != NODE_TYPE_OPERATOR_BINARY_LT && node->type != NODE_TYPE_OPERATOR_BINARY_GE &&
+      node->type != NODE_TYPE_OPERATOR_BINARY_GT) {
     // no binary compare in node
-    return;
+    return node;
   }
 
   auto first = node->getMemberUnchecked(0);
   auto second = node->getMemberUnchecked(1);
 
-  if (second->type == NODE_TYPE_ATTRIBUTE_ACCESS){
-    if (first->type != NODE_TYPE_ATTRIBUTE_ACCESS){
-      switchSidesInCompare(node);
-    } else {
-      //both are of type attribute access
-      if(first->toString() > second->toString()){
-        switchSidesInCompare(node);
-      }
+  if (second->type == NODE_TYPE_ATTRIBUTE_ACCESS) {
+    if (first->type != NODE_TYPE_ATTRIBUTE_ACCESS) {
+      return switchSidesInCompare(ast, node);
+    }
+
+    // both are of type attribute access
+    if (first->toString() > second->toString()) {
+      return switchSidesInCompare(ast, node);
     }
   }
+
+  return node;
 }
 
-/// @brief converts binary logical operators into n-ary operators
-AstNode* Condition::transformNode(AstNode* node) {
+/// @brief converts binary to n-ary, comparision normal and negation normal form
+AstNode* Condition::transformNodePreorder(AstNode* node) {
   if (node == nullptr) {
     return nullptr;
   }
 
-  if (node->type == NODE_TYPE_OPERATOR_BINARY_AND ||
-      node->type == NODE_TYPE_OPERATOR_BINARY_OR) {
+  if (node->type == NODE_TYPE_OPERATOR_BINARY_AND || node->type == NODE_TYPE_OPERATOR_BINARY_OR) {
     // convert binary AND/OR into n-ary AND/OR
     TRI_ASSERT(node->numMembers() == 2);
     auto old = node;
@@ -1318,31 +1386,89 @@ AstNode* Condition::transformNode(AstNode* node) {
     // create a new n-ary node
     node = _ast->createNode(Ast::NaryOperatorType(old->type));
     node->reserve(2);
-    node->addMember(old->getMember(0));
-    node->addMember(old->getMember(1));
+    node->addMember(transformNodePreorder(old->getMember(0)));
+    node->addMember(transformNodePreorder(old->getMember(1)));
+
+    return node;
   }
 
-  TRI_ASSERT(node->type != NODE_TYPE_OPERATOR_BINARY_AND &&
-             node->type != NODE_TYPE_OPERATOR_BINARY_OR);
+  if (node->type == NODE_TYPE_OPERATOR_UNARY_NOT) {
+    // push down logical negations
+    auto sub = node->getMemberUnchecked(0);
+
+    if (sub->type == NODE_TYPE_OPERATOR_NARY_AND || sub->type == NODE_TYPE_OPERATOR_BINARY_AND ||
+        sub->type == NODE_TYPE_OPERATOR_NARY_OR || sub->type == NODE_TYPE_OPERATOR_BINARY_OR) {
+      size_t const n = sub->numMembers();
+
+      AstNode* newOperator = nullptr;
+      if (sub->type == NODE_TYPE_OPERATOR_NARY_AND || sub->type == NODE_TYPE_OPERATOR_BINARY_AND) {
+        // ! (a && b)  =>  (! a) || (! b)
+        newOperator = _ast->createNode(NODE_TYPE_OPERATOR_NARY_OR);
+      } else {
+        // ! (a || b)  =>  (! a) && (! b)
+        newOperator = _ast->createNode(NODE_TYPE_OPERATOR_NARY_AND);
+      }
+
+      for (size_t i = 0; i < n; ++i) {
+        auto negated = transformNodePreorder(
+            _ast->createNodeUnaryOperator(NODE_TYPE_OPERATOR_UNARY_NOT,
+                                          sub->getMemberUnchecked(i)));
+        auto optimized = _ast->optimizeNotExpression(negated);
+        newOperator->addMember(optimized);
+      }
+
+      return newOperator;
+    }
+
+    if (sub->type == NODE_TYPE_OPERATOR_UNARY_NOT) {
+      // eliminate double-negatives
+      return transformNodePreorder(sub->getMemberUnchecked(0));
+    }
+
+    auto replacement = _ast->shallowCopyForModify(node);
+    replacement->changeMember(0, transformNodePreorder(sub));
+
+    return replacement;
+  }
+
+  // normalize any comparisons
+  return normalizeCompare(_ast, node);
+}
+
+/// @brief converts from negation normal to disjunctive normal form
+AstNode* Condition::transformNodePostorder(AstNode* node) {
+  if (node == nullptr) {
+    return node;
+  }
 
   if (node->type == NODE_TYPE_OPERATOR_NARY_AND) {
-    bool processChildren = false;
+    auto old = node;
+    node = _ast->shallowCopyForModify(old);
+    TRI_DEFER(FINALIZE_SUBTREE(node));
+
+    bool distributeOverChildren = false;
     bool mustCollapse = false;
-    size_t const n = node->numMembers();
+    size_t n = node->numMembers();
 
     for (size_t i = 0; i < n; ++i) {
       // process subnodes first
-      auto sub = transformNode(node->getMemberUnchecked(i));
+      auto sub = transformNodePostorder(node->getMemberUnchecked(i));
       node->changeMember(i, sub);
 
       if (sub->type == NODE_TYPE_OPERATOR_NARY_OR) {
-        processChildren = true;
+        distributeOverChildren = true;
       } else if (sub->type == NODE_TYPE_OPERATOR_NARY_AND) {
         mustCollapse = true;
       }
     }
 
-    if (processChildren) {
+    if (mustCollapse) {
+      node = collapse(node);
+      // collapsing may change n
+      n = node->numMembers();
+    }
+
+    if (distributeOverChildren) {
       // we found an AND with at least one OR child, e.g.
       //        AND
       //   OR          c
@@ -1353,71 +1479,85 @@ AstNode* Condition::transformNode(AstNode* node) {
       //   AND        AND
       //  a   c      b   c
       //
+
       auto newOperator = _ast->createNode(NODE_TYPE_OPERATOR_NARY_OR);
 
-      std::vector<PermutationState> permutationStates;
-      permutationStates.reserve(n);
+      std::vector<::PermutationState> clauses;
+      clauses.reserve(n);
 
       for (size_t i = 0; i < n; ++i) {
         auto sub = node->getMemberUnchecked(i);
 
         if (sub->type == NODE_TYPE_OPERATOR_NARY_OR) {
-          permutationStates.emplace_back(sub, sub->numMembers());
+          clauses.emplace_back(sub, sub->numMembers());
         } else {
-          permutationStates.emplace_back(sub, 1);
+          clauses.emplace_back(sub, 1);
         }
       }
 
       size_t current = 0;
       bool done = false;
-      size_t const numPermutations = permutationStates.size();
+      size_t const numClauses = clauses.size();
 
       while (!done) {
         auto andOperator = _ast->createNode(NODE_TYPE_OPERATOR_NARY_AND);
-        andOperator->reserve(numPermutations);
+        andOperator->reserve(numClauses);
 
-        for (size_t i = 0; i < numPermutations; ++i) {
-          auto const& state = permutationStates[i];
-          andOperator->addMember(state.getValue()->clone(_ast));
+        for (size_t i = 0; i < numClauses; ++i) {
+          auto const& clause = clauses[i];
+          auto sub = clause.getValue();
+          // make sure the subtree is finalized so we can avoid cloning it
+          FINALIZE_SUBTREE(sub);
+          if (sub->type == NODE_TYPE_OPERATOR_NARY_AND) {
+            // collapse, add children directly
+            for (size_t j = 0; j < sub->numMembers(); j++) {
+              andOperator->addMember(sub->getMember(j));
+            }
+          } else {
+            andOperator->addMember(sub);
+          }
         }
 
         newOperator->addMember(andOperator);
 
-        // now permute
+        // now advance the clause permutation state
         while (true) {
-          if (++permutationStates[current].current <
-              permutationStates[current].n) {
+          auto& currentClause = clauses[current];
+          if (++currentClause.current < currentClause.n) {
             current = 0;
-            // abort inner iteration
+            // still have at least one more permutation with current position
+            // in current clause
             break;
           }
 
-          permutationStates[current].current = 0;
+          // done with current clause, reset it
+          currentClause.current = 0;
 
+          // move on to next clause
           if (++current >= n) {
+            // no more clauses left!
             done = true;
             break;
           }
-          // next inner iteration
         }
       }
 
-      node = transformNode(newOperator);
-    }
-
-    if (mustCollapse) {
-      node = collapse(node);
+      node = newOperator;
     }
 
     return node;
   }
 
   if (node->type == NODE_TYPE_OPERATOR_NARY_OR) {
+    auto old = node;
+    node = _ast->shallowCopyForModify(old);
+    TRI_DEFER(FINALIZE_SUBTREE(node));
+
     size_t const n = node->numMembers();
     bool mustCollapse = false;
 
     for (size_t i = 0; i < n; ++i) {
-      auto sub = transformNode(node->getMemberUnchecked(i));
+      auto sub = transformNodePostorder(node->getMemberUnchecked(i));
       node->changeMember(i, sub);
 
       if (sub->type == NODE_TYPE_OPERATOR_NARY_OR) {
@@ -1428,44 +1568,9 @@ AstNode* Condition::transformNode(AstNode* node) {
     if (mustCollapse) {
       node = collapse(node);
     }
-
-    return node;
   }
 
-  if (node->type == NODE_TYPE_OPERATOR_UNARY_NOT) {
-    // push down logical negations
-    auto sub = node->getMemberUnchecked(0);
-
-    if (sub->type == NODE_TYPE_OPERATOR_NARY_AND ||
-        sub->type == NODE_TYPE_OPERATOR_BINARY_AND ||
-        sub->type == NODE_TYPE_OPERATOR_NARY_OR ||
-        sub->type == NODE_TYPE_OPERATOR_BINARY_OR) {
-      size_t const n = sub->numMembers();
-
-      AstNode* newOperator = nullptr;
-      if (sub->type == NODE_TYPE_OPERATOR_NARY_AND ||
-          sub->type == NODE_TYPE_OPERATOR_BINARY_AND) {
-        // ! (a && b)  =>  (! a) || (! b)
-        newOperator = _ast->createNode(NODE_TYPE_OPERATOR_NARY_OR);
-      } else {
-        // ! (a || b)  =>  (! a) && (! b)
-        newOperator = _ast->createNode(NODE_TYPE_OPERATOR_NARY_AND);
-      }
-
-      for (size_t i = 0; i < n; ++i) {
-        auto negated = transformNode(_ast->createNodeUnaryOperator(
-            NODE_TYPE_OPERATOR_UNARY_NOT, sub->getMemberUnchecked(i)));
-        auto optimized = _ast->optimizeNotExpression(negated);
-        newOperator->addMember(optimized);
-      }
-
-      return transformNode(newOperator);
-    }
-
-    node->changeMember(0, transformNode(sub));
-  }
-
-  normalizeCompare(node);
+  // we only need to handle nary and/or, the rest was handled in preorder
 
   return node;
 }
@@ -1494,6 +1599,10 @@ AstNode* Condition::fixRoot(AstNode* node, int level) {
   size_t const n = node->numMembers();
   size_t j = 0;
 
+  auto old = node;
+  node = _ast->shallowCopyForModify(old);
+  TRI_DEFER(FINALIZE_SUBTREE(node));
+
   for (size_t i = 0; i < n; ++i) {
     auto sub = node->getMemberUnchecked(i);
 
@@ -1504,7 +1613,7 @@ AstNode* Condition::fixRoot(AstNode* node, int level) {
 
     if (level == 0) {
       // recurse into next level
-      node->changeMember(j, fixRoot(sub, level + 1));
+      node->changeMember(j, fixRoot(sub, 1));
     } else if (i != j) {
       node->changeMember(j, sub);
     }

@@ -40,6 +40,7 @@ const getReadableName = require('@arangodb/foxx/manager-utils').getReadableName;
 const Router = require('@arangodb/foxx/router/router');
 const Tree = require('@arangodb/foxx/router/tree');
 const codeFrame = require('@arangodb/util').codeFrame;
+const actions = require('@arangodb/actions');
 
 const $_MODULE_ROOT = Symbol.for('@arangodb/module.root');
 const $_MODULE_CONTEXT = Symbol.for('@arangodb/module.context');
@@ -94,7 +95,6 @@ function parseFile (servicePath, filename) {
 module.exports =
   class FoxxService {
     static validatedManifest (definition) {
-      assert(definition, 'must provide a service definition');
       assert(definition.mount, 'mount path required');
       const basePath = definition.basePath || FoxxService.basePath(definition.mount);
       const manifestPath = path.resolve(basePath, 'manifest.json');
@@ -107,7 +107,7 @@ module.exports =
       return manifest;
     }
 
-    static validateServiceFiles (servicePath, manifest, rev) {
+    static validateServiceFiles (servicePath, manifest) {
       if (manifest.main) {
         parseFile(servicePath, manifest.main);
       }
@@ -162,7 +162,7 @@ module.exports =
 
       const warnings = this.applyConfiguration(this._configuration, false);
       if (warnings) {
-        console.warnLines(`Stored configuration for service "${definition.mount}" has errors:\n  ${
+        console.warnLines(`Stored configuration for service "${this.mount}" has errors:\n  ${
           Object.keys(warnings).map((key) => warnings[key]).join('\n  ')
         }\nValues for unknown options will be discarded if you save the configuration in production mode using the web interface.`);
       }
@@ -363,6 +363,9 @@ module.exports =
               if (!e.statusCode) {
                 error = new InternalServerError();
                 error.cause = e;
+                if (e.errorNum) {
+                  error.statusCode = actions.arangoErrorToHttpCode(e.errorNum);
+                }
               }
 
               if (logLevel) {
@@ -372,7 +375,7 @@ module.exports =
                 console[`${logLevel}Stack`](e, `Service "${
                   this.mount
                 }" encountered error ${
-                  e.statusCode || 500
+                  error.statusCode || 500
                 } while handling ${
                   req.requestType
                 } ${
@@ -630,6 +633,10 @@ module.exports =
 
     static checksum (mount) {
       const bundlePath = FoxxService.bundlePath(mount);
+      return this._checksumPath(bundlePath);
+    }
+
+    static _checksumPath (bundlePath) {
       if (!fs.isFile(bundlePath)) {
         throw new ArangoError({
           errorNum: errors.ERROR_FILE_NOT_FOUND.code,

@@ -23,7 +23,6 @@
 
 #include "Cache/ManagerTasks.h"
 #include "Basics/Common.h"
-#include "Basics/asio-helper.h"
 #include "Cache/Cache.h"
 #include "Cache/Manager.h"
 #include "Cache/Metadata.h"
@@ -61,12 +60,8 @@ void FreeMemoryTask::run() {
 }
 
 MigrateTask::MigrateTask(Manager::TaskEnvironment environment, Manager* manager,
-                         std::shared_ptr<Cache> cache,
-                         std::shared_ptr<Table> table)
-    : _environment(environment),
-      _manager(manager),
-      _cache(cache),
-      _table(table) {}
+                         std::shared_ptr<Cache> cache, std::shared_ptr<Table> table)
+    : _environment(environment), _manager(manager), _cache(cache), _table(table) {}
 
 MigrateTask::~MigrateTask() {}
 

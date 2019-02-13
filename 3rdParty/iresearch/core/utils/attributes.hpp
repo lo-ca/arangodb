@@ -36,7 +36,7 @@
 #include "noncopyable.hpp"
 #include "string.hpp"
 
-#include <unordered_set>
+#include <set>
 
 NS_ROOT
 
@@ -57,7 +57,7 @@ struct IRESEARCH_API attribute {
     type_id(const string_ref& name): name_(name) {}
     operator const type_id*() const { return this; }
     static bool exists(const string_ref& name);
-    static const type_id* get(const string_ref& name);
+    static const type_id* get(const string_ref& name) NOEXCEPT;
     const string_ref& name() const { return name_; }
 
    private:
@@ -73,10 +73,10 @@ struct IRESEARCH_API attribute {
 ///        static const attribute::type_id& type() NOEXCEPT
 ///          via DECLARE_ATTRIBUTE_TYPE()/DEFINE_ATTRIBUTE_TYPE(...)
 ///        static ptr make(Args&&... args)
-///          via DECLARE_FACTORY()/DECLARE_FACTORY_DEFAULT()
+///          via DECLARE_FACTORY()/DECLARE_FACTORY()
 //////////////////////////////////////////////////////////////////////////////
 struct IRESEARCH_API stored_attribute : attribute {
-  DECLARE_PTR(stored_attribute);
+  DECLARE_UNIQUE_PTR(stored_attribute);
   virtual ~stored_attribute() = default;
 };
 
@@ -162,7 +162,8 @@ struct IRESEARCH_API_TEMPLATE basic_stored_attribute : stored_attribute {
 //////////////////////////////////////////////////////////////////////////////
 class IRESEARCH_API flags {
  public:  
-  typedef std::unordered_set<const attribute::type_id*> type_map;
+  // std::set<...> is 25% faster than std::unordered_set<...> as per profile_bulk_index test
+  typedef std::set<const attribute::type_id*> type_map;
 
   static const flags& empty_instance();
 
@@ -208,7 +209,9 @@ class IRESEARCH_API flags {
   bool empty() const { return map_.empty(); }
   size_t size() const { return map_.size(); }
   void clear() NOEXCEPT { map_.clear(); }
-  void reserve(size_t cap) { map_.reserve( cap ); }
+  void reserve(size_t /*capacity*/) {
+    // NOOP for std::set
+  }
 
   template< typename T >
   bool check() const NOEXCEPT {
@@ -298,7 +301,7 @@ template<
   struct ref {
     typedef Ref<U, Args...> type;
 
-    static const type nil;
+    IRESEARCH_HELPER_DLL_LOCAL static const type NIL;
 
     static_assert(
       sizeof(typename ref<T>::type) == sizeof(type),
@@ -381,7 +384,7 @@ template<
 
   template<typename A>
   inline const typename ref<A>::type& get(
-      const typename ref<A>::type& fallback = ref<A>::nil
+      const typename ref<A>::type& fallback = ref<A>::NIL
   ) const NOEXCEPT {
     typedef typename std::enable_if<
       std::is_base_of<attribute, A>::value, A
@@ -444,7 +447,7 @@ template<
 
   const typename ref<T>::type& get(
       const attribute::type_id& type,
-      const typename ref<T>::type& fallback = ref<T>::nil
+      const typename ref<T>::type& fallback = ref<T>::NIL
   ) const NOEXCEPT {
     return const_cast<attribute_map*>(this)->get(type, const_cast<typename ref<T>::type&>(fallback));
   }
@@ -471,13 +474,13 @@ template<
 template<typename T, template <typename, typename...> class Ref, typename... Args>
 template<typename U>
 typename attribute_map<T, Ref, Args...>::template ref<U>::type
-const attribute_map<T, Ref, Args...>::ref<U>::nil;
+const attribute_map<T, Ref, Args...>::ref<U>::NIL;
 
 //////////////////////////////////////////////////////////////////////////////
 /// @brief storage of shared_ptr to attributes
 //////////////////////////////////////////////////////////////////////////////
 
-MSVC_ONLY(template class IRESEARCH_API irs::attribute_map<stored_attribute, std::shared_ptr>);
+MSVC_ONLY(template class IRESEARCH_API irs::attribute_map<stored_attribute, std::shared_ptr>;)
 
 class IRESEARCH_API attribute_store
     : public attribute_map<stored_attribute, std::shared_ptr> {
@@ -502,14 +505,13 @@ class IRESEARCH_API attribute_store
   }
 
   template<typename T, typename... Args>
-  typename ref<T>::type& emplace(Args&&... args) {
+  typename ref<T>::type& try_emplace(bool& inserted, Args&&... args) {
     REGISTER_TIMER_DETAILED();
 
     typedef typename std::enable_if<
       std::is_base_of<stored_attribute, T>::value, T
     >::type type;
 
-    bool inserted;
     auto& attr = attribute_map::emplace(inserted, type::type());
 
     if (inserted) {
@@ -517,6 +519,12 @@ class IRESEARCH_API attribute_store
     }
 
     return reinterpret_cast<typename ref<T>::type&>(attr);
+  }
+
+  template<typename T, typename... Args>
+  typename ref<T>::type& emplace(Args&&... args) {
+    bool inserted;
+    return try_emplace<T>(inserted, std::forward<Args>(args)...);
   }
 }; // attribute_store
 
@@ -539,18 +547,40 @@ class pointer_wrapper {
     return *this;
   }
   FORCE_INLINE operator bool() const NOEXCEPT {
-    return p_ != nullptr;
+    return nullptr != p_;
+  }
+  FORCE_INLINE bool operator==(std::nullptr_t) const NOEXCEPT {
+    return nullptr == p_;
+  }
+  FORCE_INLINE bool operator!=(std::nullptr_t) const NOEXCEPT {
+    return !(*this == nullptr);
   }
 
  private:
   T* p_;
 }; // pointer_wrapper
 
+template<typename T>
+FORCE_INLINE bool operator==(
+    std::nullptr_t,
+    const pointer_wrapper<T>& rhs
+) NOEXCEPT {
+  return rhs == nullptr;
+}
+
+template<typename T>
+FORCE_INLINE bool operator!=(
+    std::nullptr_t,
+    const pointer_wrapper<T>& rhs
+) NOEXCEPT {
+  return rhs != nullptr;
+}
+
 //////////////////////////////////////////////////////////////////////////////
 /// @brief storage of data pointers to attributes
 //////////////////////////////////////////////////////////////////////////////
 
-MSVC_ONLY(template class IRESEARCH_API irs::attribute_map<attribute, pointer_wrapper>);
+MSVC_ONLY(template class IRESEARCH_API irs::attribute_map<attribute, pointer_wrapper>;)
 
 class IRESEARCH_API attribute_view
     : public attribute_map<attribute, pointer_wrapper> {

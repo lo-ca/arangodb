@@ -27,13 +27,12 @@
 #include "Basics/Common.h"
 
 #ifdef TRI_HAVE_WINSOCK2_H
-#include <WinSock2.h>
 #include <WS2tcpip.h>
+#include <WinSock2.h>
 #endif
 
 #include <ostream>
 
-#include "Basics/asio-helper.h"
 #include "Basics/socket-utils.h"
 
 namespace arangodb {
@@ -46,8 +45,7 @@ class Endpoint {
   enum class DomainType { UNKNOWN = 0, UNIX, IPV4, IPV6, SRV };
 
  protected:
-  Endpoint(DomainType, EndpointType, TransportType, EncryptionType,
-           std::string const&, int);
+  Endpoint(DomainType, EndpointType, TransportType, EncryptionType, std::string const&, int);
 
  public:
   virtual ~Endpoint() {}
@@ -57,8 +55,7 @@ class Endpoint {
   static std::string unifiedForm(std::string const&);
   static Endpoint* serverFactory(std::string const&, int, bool reuseAddress);
   static Endpoint* clientFactory(std::string const&);
-  static Endpoint* factory(const EndpointType type, std::string const&, int,
-                           bool);
+  static Endpoint* factory(const EndpointType type, std::string const&, int, bool);
   static std::string const defaultEndpoint(TransportType);
 
  public:
@@ -82,7 +79,7 @@ class Endpoint {
   virtual int port() const = 0;
   virtual std::string host() const = 0;
   virtual std::string hostAndPort() const = 0;
-  
+
   int listenBacklog() const { return _listenBacklog; }
 
  public:
@@ -99,7 +96,7 @@ class Endpoint {
   bool _connected;
   TRI_socket_t _socket;
 };
-}
+}  // namespace arangodb
 
 std::ostream& operator<<(std::ostream&, arangodb::Endpoint::TransportType);
 std::ostream& operator<<(std::ostream&, arangodb::Endpoint::EndpointType);

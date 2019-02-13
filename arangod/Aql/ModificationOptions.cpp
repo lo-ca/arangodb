@@ -40,10 +40,12 @@ ModificationOptions::ModificationOptions(VPackSlice const& slice) {
       basics::VelocyPackHelper::getBooleanValue(obj, "ignoreDocumentNotFound", false);
   readCompleteInput =
       basics::VelocyPackHelper::getBooleanValue(obj, "readCompleteInput", true);
-  useIsRestore =
-      basics::VelocyPackHelper::getBooleanValue(obj, "useIsRestore", false);
+  useIsRestore = basics::VelocyPackHelper::getBooleanValue(obj, "useIsRestore", false);
   consultAqlWriteFilter =
       basics::VelocyPackHelper::getBooleanValue(obj, "consultAqlWriteFilter", false);
+  exclusive = basics::VelocyPackHelper::getBooleanValue(obj, "exclusive", false);
+  overwrite = basics::VelocyPackHelper::getBooleanValue(obj, "overwrite", false);
+  ignoreRevs = basics::VelocyPackHelper::getBooleanValue(obj, "ignoreRevs", true);
 }
 
 void ModificationOptions::toVelocyPack(VPackBuilder& builder) const {
@@ -56,4 +58,7 @@ void ModificationOptions::toVelocyPack(VPackBuilder& builder) const {
   builder.add("readCompleteInput", VPackValue(readCompleteInput));
   builder.add("useIsRestore", VPackValue(useIsRestore));
   builder.add("consultAqlWriteFilter", VPackValue(consultAqlWriteFilter));
+  builder.add("exclusive", VPackValue(exclusive));
+  builder.add("overwrite", VPackValue(overwrite));
+  builder.add("ignoreRevs", VPackValue(ignoreRevs));
 }

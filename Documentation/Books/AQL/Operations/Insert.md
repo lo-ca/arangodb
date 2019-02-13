@@ -24,10 +24,10 @@ traversal operations, or AQL functions that can read documents.
 The syntax for an insert operation is:
 
 ```
-INSERT document IN collection options
+INSERT document INTO collection [ OPTIONS options ]
 ```
 
-**Note**: The *INTO* keyword is also allowed in the place of *IN*.
+**Note**: The *IN* keyword is allowed in place of *INTO* and has the same meaning.
 
 *collection* must contain the name of the collection into which the documents should
 be inserted. *document* is the document to be inserted, and it may or may not contain
@@ -37,7 +37,14 @@ revision number for the document.
 
 ```js
 FOR i IN 1..100
-  INSERT { value: i } IN numbers
+  INSERT { value: i } INTO numbers
+```
+
+An insert operation can also be performed without a *FOR* loop to insert a
+single document:
+
+```js
+INSERT { value: 1 } INTO numbers
 ```
 
 When inserting into an [edge collection](../../Manual/Appendix/Glossary.html#edge-collection),
@@ -47,12 +54,16 @@ it is mandatory to specify the attributes *_from* and *_to* in document:
 FOR u IN users
   FOR p IN products
     FILTER u._key == p.recommendedBy
-    INSERT { _from: u._id, _to: p._id } IN recommendations
+    INSERT { _from: u._id, _to: p._id } INTO recommendations
 ```
 
-### Setting query options
+Setting query options
+---------------------
 
-*options* can be used to suppress query errors that may occur when violating unique
+The *OPTIONS* keyword followed by an object with query options can optionally
+be provided in an *INSERT* operation.
+
+It can be used to suppress query errors that may occur when violating unique
 key constraints:
 
 ```js
@@ -76,7 +87,36 @@ FOR i IN 1..1000
   } INTO users OPTIONS { waitForSync: true }
 ```
 
-### Returning the inserted documents
+If you want to replace existing documents with documents having the same key
+there is the *overwrite* query option. This will let you safely replace the
+documents instead of raising an "unique constraint violated error":
+
+```js
+FOR i IN 1..1000
+  INSERT {
+    _key: CONCAT('test', i),
+    name: "test",
+    foobar: true
+  } INTO users OPTIONS { overwrite: true }
+```
+
+In contrast to the MMFiles engine, the RocksDB engine does not require collection-level
+locks. Different write operations on the same collection do not block each other, as
+long as there are no _write-write conficts_ on the same documents. From an application
+development perspective it can be desired to have exclusive write access on collections,
+to simplify the development. Note that writes do not block reads in RocksDB.
+Exclusive access can also speed up modification queries, because we avoid conflict checks.
+
+Use the *exclusive* option to achieve this effect on a per query basis:
+
+```js
+FOR doc IN collection
+  INSERT { myval: doc.val + 1 } INTO users 
+  OPTIONS { exclusive: true }
+```
+
+Returning the inserted documents
+--------------------------------
 
 The inserted documents can also be returned by the query. In this case, the `INSERT` 
 statement can be a `RETURN` statement (intermediate `LET` statements are allowed, too).
@@ -88,7 +128,7 @@ the database (e.g. `_id`, `_key`, `_rev`).
 
 
 ```js
-INSERT document IN collection options RETURN NEW
+INSERT document INTO collection RETURN NEW
 ```
 
 Following is an example using a variable named `inserted` to return the inserted
@@ -96,7 +136,8 @@ documents. For each inserted document, the document key is returned:
 
 ```js
 FOR i IN 1..100
-  INSERT { value: i } 
-  LET inserted = NEW 
+  INSERT { value: i }
+  INTO users
+  LET inserted = NEW
   RETURN inserted._key
 ```

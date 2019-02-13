@@ -31,9 +31,9 @@
 
 using namespace arangodb;
 
-RocksDBBackgroundThread::RocksDBBackgroundThread(RocksDBEngine* eng,
-                                                 double interval)
-    : Thread("RocksDBThread"), _engine(eng), _interval(interval) {}
+RocksDBBackgroundThread::RocksDBBackgroundThread(RocksDBEngine* eng, double interval)
+    : Thread("RocksDBThread"), _engine(eng), _interval(interval),
+      _disableWalFilePruning(0) {}
 
 RocksDBBackgroundThread::~RocksDBBackgroundThread() { shutdown(); }
 
@@ -46,6 +46,8 @@ void RocksDBBackgroundThread::beginShutdown() {
 }
 
 void RocksDBBackgroundThread::run() {
+  double const startTime = TRI_microtime();
+
   while (!isStopping()) {
     {
       CONDITION_LOCKER(guard, _condition);
@@ -56,9 +58,23 @@ void RocksDBBackgroundThread::run() {
       continue;
     }
 
+    TRI_IF_FAILURE("RocksDBBackgroundThread::run") { continue; }
+
     try {
       if (!isStopping()) {
-        _engine->settingsManager()->sync(false);
+        double start = TRI_microtime();
+        Result res = _engine->settingsManager()->sync(false);
+        if (res.fail()) {
+          LOG_TOPIC(WARN, Logger::ENGINES)
+              << "background settings sync failed: " << res.errorMessage();
+        }
+
+        double end = TRI_microtime();
+        if ((end - start) > 0.75) {
+          LOG_TOPIC(WARN, Logger::ENGINES)
+              << "slow background settings sync: " << Logger::FIXED(end - start, 6)
+              << " s";
+        }
       }
 
       bool force = isStopping();
@@ -66,35 +82,43 @@ void RocksDBBackgroundThread::run() {
 
       TRI_voc_tick_t minTick = rocksutils::latestSequenceNumber();
       auto cmTick = _engine->settingsManager()->earliestSeqNeeded();
+
       if (cmTick < minTick) {
         minTick = cmTick;
       }
+
       if (DatabaseFeature::DATABASE != nullptr) {
-        DatabaseFeature::DATABASE->enumerateDatabases(
-            [force, &minTick](TRI_vocbase_t* vocbase) {
-              vocbase->cursorRepository()->garbageCollect(force);
-              // FIXME: configurable interval tied to follower timeout
-              vocbase->garbageCollectReplicationClients(120.0);
-              auto clients = vocbase->getReplicationClients();
-              for (auto c : clients) {
-                if (std::get<2>(c) < minTick) {
-                  minTick = std::get<2>(c);
-                }
-              }
-            });
+        DatabaseFeature::DATABASE->enumerateDatabases([&minTick](TRI_vocbase_t& vocbase) -> void {
+          auto clients = vocbase.getReplicationClients();
+          for (auto c : clients) {
+            if (std::get<3>(c) < minTick) {
+              minTick = std::get<3>(c);
+            }
+          }
+        });
       }
 
-      // determine which WAL files can be pruned
-      _engine->determinePrunableWalFiles(minTick);
-      // and then prune them when they expired
-      _engine->pruneWalFiles();
+      if (!disableWalFilePruning()) {
+        // only start pruning of obsolete WAL files a few minutes after
+        // server start. if we start pruning too early, replication slaves
+        // will not have a chance to reconnect to a restarted master in
+        // time so the master may purge WAL files that replication slaves
+        // would still like to peek into
+        if (TRI_microtime() >= startTime + _engine->pruneWaitTimeInitial()) {
+          // determine which WAL files can be pruned
+          _engine->determinePrunableWalFiles(minTick);
+          // and then prune them when they expired
+          _engine->pruneWalFiles();
+        }
+      }
     } catch (std::exception const& ex) {
-      LOG_TOPIC(WARN, Logger::FIXME)
+      LOG_TOPIC(WARN, Logger::ENGINES)
           << "caught exception in rocksdb background thread: " << ex.what();
     } catch (...) {
-      LOG_TOPIC(WARN, Logger::FIXME)
+      LOG_TOPIC(WARN, Logger::ENGINES)
           << "caught unknown exception in rocksdb background";
     }
   }
+
   _engine->settingsManager()->sync(true);  // final write on shutdown
 }

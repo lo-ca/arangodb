@@ -22,17 +22,20 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include "GeneralClientConnection.h"
+#include "ApplicationFeatures/ApplicationServer.h"
+#include "ApplicationFeatures/CommunicationPhase.h"
+#include "Basics/socket-utils.h"
+#include "Logger/Logger.h"
 #include "SimpleHttpClient/ClientConnection.h"
 #include "SimpleHttpClient/SslClientConnection.h"
-#include "Basics/socket-utils.h"
 
 #ifdef TRI_HAVE_POLL_H
 #include <poll.h>
 #endif
 
 #ifdef TRI_HAVE_WINSOCK2_H
-#include <WinSock2.h>
 #include <WS2tcpip.h>
+#include <WinSock2.h>
 #endif
 
 #include <sys/types.h>
@@ -55,10 +58,8 @@ using namespace arangodb::httpclient;
 /// @brief creates a new client connection
 ////////////////////////////////////////////////////////////////////////////////
 
-GeneralClientConnection::GeneralClientConnection(Endpoint* endpoint,
-                                                 double requestTimeout,
-                                                 double connectTimeout,
-                                                 size_t connectRetries)
+GeneralClientConnection::GeneralClientConnection(Endpoint* endpoint, double requestTimeout,
+                                                 double connectTimeout, size_t connectRetries)
     : _endpoint(endpoint),
       _freeEndpointOnDestruction(false),
       _requestTimeout(requestTimeout),
@@ -66,13 +67,17 @@ GeneralClientConnection::GeneralClientConnection(Endpoint* endpoint,
       _connectRetries(connectRetries),
       _numConnectRetries(0),
       _isConnected(false),
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+      _read(0),
+      _written(0),
+#endif
       _isInterrupted(false) {
   TRI_invalidatesocket(&_socket);
 }
 
-GeneralClientConnection::GeneralClientConnection(
-    std::unique_ptr<Endpoint>& endpoint, double requestTimeout,
-    double connectTimeout, size_t connectRetries)
+GeneralClientConnection::GeneralClientConnection(std::unique_ptr<Endpoint>& endpoint,
+                                                 double requestTimeout,
+                                                 double connectTimeout, size_t connectRetries)
     : _endpoint(endpoint.release()),
       _freeEndpointOnDestruction(true),
       _requestTimeout(requestTimeout),
@@ -80,6 +85,10 @@ GeneralClientConnection::GeneralClientConnection(
       _connectRetries(connectRetries),
       _numConnectRetries(0),
       _isConnected(false),
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+      _read(0),
+      _written(0),
+#endif
       _isInterrupted(false) {
   TRI_invalidatesocket(&_socket);
 }
@@ -98,12 +107,13 @@ GeneralClientConnection::~GeneralClientConnection() {
 /// @brief create a new connection from an endpoint
 ////////////////////////////////////////////////////////////////////////////////
 
-GeneralClientConnection* GeneralClientConnection::factory(
-    Endpoint* endpoint, double requestTimeout, double connectTimeout,
-    size_t numRetries, uint64_t sslProtocol) {
+GeneralClientConnection* GeneralClientConnection::factory(Endpoint* endpoint,
+                                                          double requestTimeout,
+                                                          double connectTimeout,
+                                                          size_t numRetries,
+                                                          uint64_t sslProtocol) {
   if (endpoint->encryption() == Endpoint::EncryptionType::NONE) {
-    return new ClientConnection(endpoint, requestTimeout, connectTimeout,
-                                numRetries);
+    return new ClientConnection(endpoint, requestTimeout, connectTimeout, numRetries);
   } else if (endpoint->encryption() == Endpoint::EncryptionType::SSL) {
     return new SslClientConnection(endpoint, requestTimeout, connectTimeout,
                                    numRetries, sslProtocol);
@@ -113,11 +123,10 @@ GeneralClientConnection* GeneralClientConnection::factory(
 }
 
 GeneralClientConnection* GeneralClientConnection::factory(
-    std::unique_ptr<Endpoint>& endpoint, double requestTimeout, double connectTimeout,
-    size_t numRetries, uint64_t sslProtocol) {
+    std::unique_ptr<Endpoint>& endpoint, double requestTimeout,
+    double connectTimeout, size_t numRetries, uint64_t sslProtocol) {
   if (endpoint->encryption() == Endpoint::EncryptionType::NONE) {
-    return new ClientConnection(endpoint, requestTimeout, connectTimeout,
-                                numRetries);
+    return new ClientConnection(endpoint, requestTimeout, connectTimeout, numRetries);
   } else if (endpoint->encryption() == Endpoint::EncryptionType::SSL) {
     return new SslClientConnection(endpoint, requestTimeout, connectTimeout,
                                    numRetries, sslProtocol);
@@ -156,18 +165,29 @@ bool GeneralClientConnection::connect() {
 
 void GeneralClientConnection::disconnect() {
   if (isConnected()) {
+#ifdef ARANGODB_ENABLE_MAINTAINER_MODE
+    if ((_written + _read) == 0) {
+      std::string bt;
+      TRI_GetBacktrace(bt);
+      LOG_TOPIC(WARN, Logger::COMMUNICATION)
+          << "Closing HTTP-connection right after opening it without sending "
+             "data!"
+          << bt;
+    }
+    _written = 0;
+    _read = 0;
+#endif
     disconnectSocket();
+    _numConnectRetries = 0;
+    _isConnected = false;
   }
-
-  _isConnected = false;
-  _numConnectRetries = 0;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 /// @brief prepare connection for read/write I/O
 ////////////////////////////////////////////////////////////////////////////////
 
-bool GeneralClientConnection::prepare(TRI_socket_t socket, double timeout, bool isWrite) const {
+bool GeneralClientConnection::prepare(TRI_socket_t socket, double timeout, bool isWrite) {
   // wait for at most 0.5 seconds for poll/select to complete
   // if it takes longer, break each poll/select into smaller chunks so we can
   // interrupt the whole process if it takes too long in total
@@ -176,8 +196,13 @@ bool GeneralClientConnection::prepare(TRI_socket_t socket, double timeout, bool 
   double start = TRI_microtime();
   int res;
 
+  auto comm =
+      application_features::ApplicationServer::getFeature<arangodb::application_features::CommunicationFeaturePhase>(
+          "CommunicationPhase");
+
 #ifdef TRI_HAVE_POLL_H
   // Here we have poll, on all other platforms we use select
+  double sinceLastSocketCheck = start;
   bool nowait = (timeout == 0.0);
   int towait;
   if (timeout * 1000.0 > static_cast<double>(INT_MAX)) {
@@ -192,9 +217,10 @@ bool GeneralClientConnection::prepare(TRI_socket_t socket, double timeout, bool 
   poller.events = (isWrite ? POLLOUT : POLLIN);
 
   while (true) {  // will be left by break
-    res = poll(&poller, 1, towait > static_cast<int>(POLL_DURATION * 1000.0)
-                               ? static_cast<int>(POLL_DURATION * 1000.0)
-                               : towait);
+    res = poll(&poller, 1,
+               towait > static_cast<int>(POLL_DURATION * 1000.0)
+                   ? static_cast<int>(POLL_DURATION * 1000.0)
+                   : towait);
     if (res == -1 && errno == EINTR) {
       if (!nowait) {
         double end = TRI_microtime();
@@ -211,7 +237,7 @@ bool GeneralClientConnection::prepare(TRI_socket_t socket, double timeout, bool 
     }
 
     if (res == 0) {
-      if (isInterrupted()) {
+      if (isInterrupted() || !comm->getCommAllowed()) {
         _errorDetails = std::string("command locally aborted");
         TRI_set_errno(TRI_ERROR_REQUEST_CANCELED);
         return false;
@@ -221,6 +247,16 @@ bool GeneralClientConnection::prepare(TRI_socket_t socket, double timeout, bool 
       if (towait <= 0) {
         break;
       }
+
+      // periodically recheck our socket
+      if (end - sinceLastSocketCheck >= 20.0) {
+        sinceLastSocketCheck = end;
+        if (!checkSocket()) {
+          // socket seems broken. now escape this loop
+          break;
+        }
+      }
+
       start = end;
       continue;
     }
@@ -232,7 +268,7 @@ bool GeneralClientConnection::prepare(TRI_socket_t socket, double timeout, bool 
 //   0 : if the timeout happened
 //   -1: if an error happened, EINTR within the timeout is already caught
 #else
-  // All versions use select:
+  // All other versions use select:
 
   // An fd_set is a fixed size buffer.
   // Executing FD_CLR() or FD_SET() with a value of fd that is negative or is
@@ -283,7 +319,7 @@ bool GeneralClientConnection::prepare(TRI_socket_t socket, double timeout, bool 
       timeout = timeout - (end - start);
       start = end;
     } else if (res == 0) {
-      if (isInterrupted()) {
+      if (isInterrupted() || !comm->getCommAllowed()) {
         _errorDetails = std::string("command locally aborted");
         TRI_set_errno(TRI_ERROR_REQUEST_CANCELED);
         return false;
@@ -300,7 +336,7 @@ bool GeneralClientConnection::prepare(TRI_socket_t socket, double timeout, bool 
 #endif
 
   if (res > 0) {
-    if (isInterrupted()) {
+    if (isInterrupted() || !comm->getCommAllowed()) {
       _errorDetails = std::string("command locally aborted");
       TRI_set_errno(TRI_ERROR_REQUEST_CANCELED);
       return false;
@@ -341,8 +377,7 @@ bool GeneralClientConnection::checkSocket() {
 
   TRI_ASSERT(TRI_isvalidsocket(_socket));
 
-  int res =
-      TRI_getsockopt(_socket, SOL_SOCKET, SO_ERROR, (void*)&so_error, &len);
+  int res = TRI_getsockopt(_socket, SOL_SOCKET, SO_ERROR, (void*)&so_error, &len);
 
   if (res != TRI_ERROR_NO_ERROR) {
     TRI_set_errno(errno);

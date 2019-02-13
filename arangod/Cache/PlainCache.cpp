@@ -97,7 +97,7 @@ Result PlainCache::insert(CachedValue* value) {
       change -= static_cast<int64_t>(candidate->size());
     }
 
-    _metadata.readLock(); // special case
+    _metadata.readLock();  // special case
     allowed = _metadata.adjustUsageIfAllowed(change);
     _metadata.readUnlock();
 
@@ -123,7 +123,7 @@ Result PlainCache::insert(CachedValue* value) {
 
   bucket->unlock();
   if (maybeMigrate) {
-    requestMigrate(_table->idealSize());  // let function do the hard work
+    requestMigrate(source->idealSize());  // let function do the hard work
   }
 
   return status;
@@ -147,7 +147,7 @@ Result PlainCache::remove(void const* key, uint32_t keySize) {
   if (candidate != nullptr) {
     int64_t change = -static_cast<int64_t>(candidate->size());
 
-    _metadata.readLock(); // special case
+    _metadata.readLock();  // special case
     bool allowed = _metadata.adjustUsageIfAllowed(change);
     TRI_ASSERT(allowed);
     _metadata.readUnlock();
@@ -158,7 +158,7 @@ Result PlainCache::remove(void const* key, uint32_t keySize) {
 
   bucket->unlock();
   if (maybeMigrate) {
-    requestMigrate(_table->idealSize());
+    requestMigrate(source->idealSize());
   }
 
   return status;
@@ -170,9 +170,9 @@ Result PlainCache::blacklist(void const* key, uint32_t keySize) {
 
 uint64_t PlainCache::allocationSize(bool enableWindowedStats) {
   return sizeof(PlainCache) +
-         (enableWindowedStats ? (sizeof(StatBuffer) +
-                                 StatBuffer::allocationSize(_findStatsCapacity))
-                              : 0);
+         (enableWindowedStats
+              ? (sizeof(StatBuffer) + StatBuffer::allocationSize(_findStatsCapacity))
+              : 0);
 }
 
 std::shared_ptr<Cache> PlainCache::create(Manager* manager, uint64_t id, Metadata&& metadata,
@@ -182,14 +182,14 @@ std::shared_ptr<Cache> PlainCache::create(Manager* manager, uint64_t id, Metadat
                                       std::move(metadata), table, enableWindowedStats);
 }
 
-PlainCache::PlainCache(Cache::ConstructionGuard guard, Manager* manager, uint64_t id,
-                       Metadata&& metadata, std::shared_ptr<Table> table,
-                       bool enableWindowedStats)
+PlainCache::PlainCache(Cache::ConstructionGuard guard, Manager* manager,
+                       uint64_t id, Metadata&& metadata,
+                       std::shared_ptr<Table> table, bool enableWindowedStats)
     : Cache(guard, manager, id, std::move(metadata), table, enableWindowedStats,
             PlainCache::bucketClearer, PlainBucket::slotsData) {}
 
 PlainCache::~PlainCache() {
-  if (!_shutdown) {
+  if (!isShutdown()) {
     try {
       shutdown();
     } catch (...) {
@@ -221,16 +221,18 @@ uint64_t PlainCache::freeMemoryFrom(uint32_t hash) {
 
   bucket->unlock();
 
-  int32_t size = _table->idealSize();
-  if (maybeMigrate) {
-    requestMigrate(size);
+  cache::Table* table = _table.load(std::memory_order_relaxed);
+  if (table) {
+    int32_t size = table->idealSize();
+    if (maybeMigrate) {
+      requestMigrate(size);
+    }
   }
 
   return reclaimed;
 }
 
-void PlainCache::migrateBucket(void* sourcePtr,
-                               std::unique_ptr<Table::Subtable> targets,
+void PlainCache::migrateBucket(void* sourcePtr, std::unique_ptr<Table::Subtable> targets,
                                std::shared_ptr<Table> newTable) {
   // lock current bucket
   auto source = reinterpret_cast<PlainBucket*>(sourcePtr);
@@ -248,8 +250,7 @@ void PlainCache::migrateBucket(void* sourcePtr,
       uint32_t hash = source->_cachedHashes[k];
       CachedValue* value = source->_cachedData[k];
 
-      auto targetBucket =
-          reinterpret_cast<PlainBucket*>(targets->fetchBucket(hash));
+      auto targetBucket = reinterpret_cast<PlainBucket*>(targets->fetchBucket(hash));
       bool haveSpace = true;
       if (targetBucket->isFull()) {
         CachedValue* candidate = targetBucket->evictionCandidate();
@@ -289,22 +290,21 @@ void PlainCache::migrateBucket(void* sourcePtr,
   source->unlock();
 }
 
-std::tuple<Result, PlainBucket*, Table*> PlainCache::getBucket(
-    uint32_t hash, uint64_t maxTries, bool singleOperation) {
+std::tuple<Result, PlainBucket*, Table*> PlainCache::getBucket(uint32_t hash, uint64_t maxTries,
+                                                               bool singleOperation) {
   Result status;
   PlainBucket* bucket = nullptr;
   Table* source = nullptr;
 
-  Table* table = _table;
+  Table* table = _table.load(std::memory_order_relaxed);
   if (isShutdown() || table == nullptr) {
     status.reset(TRI_ERROR_SHUTTING_DOWN);
-    return std::make_tuple(status, bucket, source);
+    return std::make_tuple(std::move(status), bucket, source);
   }
 
   if (singleOperation) {
     _manager->reportAccess(_id);
   }
-
 
   auto pair = table->fetchAndLockBucket(hash, maxTries);
   bucket = reinterpret_cast<PlainBucket*>(pair.first);
@@ -314,7 +314,7 @@ std::tuple<Result, PlainBucket*, Table*> PlainCache::getBucket(
     status.reset(TRI_ERROR_LOCK_TIMEOUT);
   }
 
-  return std::make_tuple(status, bucket, source);
+  return std::make_tuple(std::move(status), bucket, source);
 }
 
 Table::BucketClearer PlainCache::bucketClearer(Metadata* metadata) {
@@ -325,7 +325,7 @@ Table::BucketClearer PlainCache::bucketClearer(Metadata* metadata) {
       if (bucket->_cachedData[j] != nullptr) {
         uint64_t size = bucket->_cachedData[j]->size();
         freeValue(bucket->_cachedData[j]);
-        metadata->readLock(); // special case
+        metadata->readLock();  // special case
         metadata->adjustUsageIfAllowed(-static_cast<int64_t>(size));
         metadata->readUnlock();
       }

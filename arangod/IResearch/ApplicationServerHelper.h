@@ -33,37 +33,17 @@ namespace aql {
 struct Function;
 class AqlFunctionFeature;
 
-} // aql
+}  // namespace aql
 
 namespace iresearch {
 
-bool addFunction(
-  arangodb::aql::AqlFunctionFeature& functions,
-  arangodb::aql::Function const& function
-);
+bool addFunction(arangodb::aql::AqlFunctionFeature& functions,
+                 arangodb::aql::Function const& function);
 
-template<typename T>
-T* getFeature(std::string const& name) {
-  auto* feature = arangodb::application_features::ApplicationServer::lookupFeature(name);
+arangodb::aql::Function const* getFunction(arangodb::aql::AqlFunctionFeature& functions,
+                                           std::string const& name);
 
-  #ifdef ARANGODB_ENABLE_MAINTAINER_MODE
-    return dynamic_cast<T*>(feature);
-  #else
-    return static_cast<T*>(feature);
-  #endif
-}
-
-template<typename T>
-T* getFeature() {
-  return getFeature<T>(T::name());
-}
-
-arangodb::aql::Function const* getFunction(
-  arangodb::aql::AqlFunctionFeature& functions,
-  std::string const& name
-);
-
-} // iresearch
-} // arangodb
+}  // namespace iresearch
+}  // namespace arangodb
 
 #endif

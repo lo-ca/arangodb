@@ -27,28 +27,31 @@
 
 #include <iostream>
 
-using namespace arangodb;
 using namespace arangodb::rest;
 using namespace arangodb::options;
 
-VersionFeature::VersionFeature(application_features::ApplicationServer* server) 
-    : ApplicationFeature(server, "Version"),
-      _printVersion(false) {
+namespace arangodb {
+
+VersionFeature::VersionFeature(application_features::ApplicationServer& server)
+    : ApplicationFeature(server, "Version"), _printVersion(false) {
   setOptional(false);
-  requiresElevatedPrivileges(false);
 
   startsAfter("ShellColors");
 }
 
 void VersionFeature::collectOptions(std::shared_ptr<ProgramOptions> options) {
   options->addOption("--version", "reports the version and exits",
-                     new BooleanParameter(&_printVersion));
+                     new BooleanParameter(&_printVersion),
+                     arangodb::options::makeFlags(arangodb::options::Flags::Command));
 }
 
 void VersionFeature::validateOptions(std::shared_ptr<ProgramOptions>) {
   if (_printVersion) {
-    std::cout << Version::getServerVersion() << std::endl << std::endl
+    std::cout << Version::getServerVersion() << std::endl
+              << std::endl
               << Version::getDetailed() << std::endl;
     exit(EXIT_SUCCESS);
   }
 }
+
+}  // namespace arangodb
